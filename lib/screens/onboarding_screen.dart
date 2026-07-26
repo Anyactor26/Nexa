@@ -119,7 +119,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
         content: const Text(
           'If Android shows “Restricted setting”, open App Info first, tap the '
           'three-dot menu, and choose “Allow restricted settings”. Then return '
-          'and open Accessibility Settings to enable PrivateAgent Screen Control.',
+          'and open Accessibility Settings to enable Nexa Screen Control.',
         ),
         actions: [
           TextButton(
@@ -228,7 +228,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: const Text(
-                'Configuration validated! Launching PrivateAgent...',
+                'Configuration validated! Launching Nexa...',
               ),
               backgroundColor: Colors.indigoAccent,
               behavior: SnackBarBehavior.floating,
@@ -631,7 +631,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
           const Spacer(flex: 2),
           // Clean Title
           Text(
-            'PrivateAgent',
+            'Nexa',
             style: TextStyle(
               fontSize: 38,
               fontWeight: FontWeight.w900,
@@ -641,7 +641,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
           ),
           const SizedBox(height: 16),
           Text(
-            'Your local, secure, and smart mobile companion. PrivateAgent can navigate apps, perform operations, and speak with you.',
+            'Your local, secure, and smart mobile companion. Nexa can navigate apps, perform operations, and speak with you.',
             textAlign: TextAlign.center,
             style: TextStyle(
               fontSize: 15,
@@ -829,7 +829,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
                   const SizedBox(height: 12),
                   _buildPermissionCard(
                     'Display Over Other Apps (Floating Bubble)',
-                    'Allows PrivateAgent to show a floating overlay bubble when backgrounded or executing a task so you can monitor progress and execute actions.',
+                    'Allows Nexa to show a floating overlay bubble when backgrounded or executing a task so you can monitor progress and execute actions.',
                     Icons.layers_rounded,
                     _isOverlayGranted,
                     _requestOverlayPermission,
@@ -840,7 +840,7 @@ class _OnboardingScreenState extends State<OnboardingScreen>
                 _buildSectionHeader('OPTIONAL', isDark),
                 _buildPermissionCard(
                   'Notifications',
-                  'Allows PrivateAgent to show ongoing tasks, alerts, and execution updates in your notification tray.',
+                  'Allows Nexa to show ongoing tasks, alerts, and execution updates in your notification tray.',
                   Icons.notifications_rounded,
                   _isNotificationsGranted,
                   () => _requestPermission(Permission.notification),

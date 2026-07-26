@@ -1,5 +1,5 @@
-name: private_agent
-description: "AI agent for Android"
+name: nexa
+description: "Nexa — a private, on-device AI agent for Android"
 publish_to: "none"
 version: 1.0.2+2021
 

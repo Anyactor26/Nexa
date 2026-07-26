@@ -18,7 +18,7 @@ class AiService {
 
   /// Free, general-purpose chat endpoints verified in NVIDIA's NIM catalog.
   /// The live /models response is intersected with this list so unavailable or
-  /// non-chat models never appear in PrivateAgent's NVIDIA model picker.
+  /// non-chat models never appear in Nexa's NVIDIA model picker.
   static const List<String> nvidiaFreeChatModels = [
     'z-ai/glm-5.2',
     'nvidia/nemotron-3-nano-30b-a3b',
@@ -53,14 +53,29 @@ class AiService {
   String _model = _defaultModel;
   int _maxSteps = 15;
   bool _disableMaxSteps = false;
-  double _temperature = 1.0;
+  double _temperature = 0.4;
   int _maxTokens = 1024;
   bool _useScreenCompression = true;
   bool _useSystemPrompt = true;
+
+  /// Multiplier applied to every artificial delay in the automation
+  /// workflow (screen-transition waits, retry backoff, etc). `1.0` is the
+  /// normal, safe pace; higher values make Nexa wait less between steps so
+  /// multi-step tasks complete faster. Clamped to [1.0, 200.0].
+  double _speedMultiplier = 1.0;
+
+  /// Floor below which delays are never scaled down further, so the
+  /// accessibility service always has *some* time to register UI changes
+  /// even at 200x speed.
+  static const Duration _minScaledDelay = Duration(milliseconds: 12);
+
   final List<Map<String, String>> _conversationHistory = [];
 
+  /// Only the last 6 messages are kept/sent to the API to save tokens.
+  static const int _maxHistoryLength = 6;
+
   static const String _systemPrompt = '''
-You are PrivateAgent, a helpful AI assistant that controls an Android phone. You can perform device actions and also have normal conversations.
+You are Nexa, a helpful AI assistant that controls an Android phone. You can perform device actions and also have normal conversations.
 
 When the user wants to perform a device action, you MUST respond with ONLY a JSON object (no markdown, no code fences, no extra text) in this exact format:
 {"action": "action_name", "params": {"key": "value"}, "response": "What you say to the user"}
@@ -96,11 +111,17 @@ Examples of when to use open_app:
 - "Open YouTube" → open_app (just opening, no further action)
 - "Open Settings" → open_app (just opening)
 
+CODING & FILE CREATION GUIDANCE:
+- The device cannot compile or run code for you, so when a user asks you to write code, a script, or a config/file, respond with plain text (not a JSON action) containing the complete, working code in a fenced code block with the correct language tag.
+- Keep code focused and runnable — include only what's needed to satisfy the request, add brief comments where they clarify intent, and call out any setup steps (dependencies, file name, how to run it) right after the code block.
+- If the user wants that code saved as a file and executed on-device, use execute_task and describe the goal (e.g. "create app.py in Termux with the given contents and run it") so the automation layer can drive Termux or a text editor app to do it.
+- Prefer small, correct, idiomatic solutions over long ones — remember responses are capped at a limited token budget, so avoid unnecessary boilerplate or repeating the user's prompt back to them.
+
 For normal conversation (questions, chat, info requests), just respond with plain text naturally.
 ''';
 
   static const String _chatSystemPrompt = '''
-You are PrivateAgent, a helpful conversational AI assistant. 
+You are Nexa, a helpful conversational AI assistant. 
 Provide direct, natural, and friendly text responses. You cannot perform device actions or run tools. 
 Answer questions, explain concepts, brainstorm, write emails/messages, and chat with the user in plain text or markdown format.
 ''';
@@ -112,10 +133,14 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
     _model = prefs.getString('api_model') ?? _defaultModel;
     _maxSteps = prefs.getInt('api_max_steps') ?? 15;
     _disableMaxSteps = prefs.getBool('api_disable_max_steps') ?? false;
-    _temperature = prefs.getDouble('api_temperature') ?? 1.0;
+    _temperature = prefs.getDouble('api_temperature') ?? 0.4;
     _maxTokens = prefs.getInt('api_max_tokens') ?? 1024;
     _useScreenCompression = prefs.getBool('api_use_screen_compression') ?? true;
     _useSystemPrompt = prefs.getBool('api_use_system_prompt') ?? true;
+    _speedMultiplier = (prefs.getDouble('api_speed_multiplier') ?? 1.0).clamp(
+      1.0,
+      200.0,
+    );
   }
 
   Future<void> saveSettings({
@@ -156,6 +181,16 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
     await prefs.setBool('api_disable_max_steps', disable);
   }
 
+  /// Persists the automation speed multiplier (1x - 200x). Higher values
+  /// shrink every artificial wait in [TaskExecutor] proportionally, so
+  /// multi-step tasks run through screens much faster. Values are clamped
+  /// to a safe [1.0, 200.0] range.
+  Future<void> saveSpeedMultiplier(double multiplier) async {
+    final prefs = await SharedPreferences.getInstance();
+    _speedMultiplier = multiplier.clamp(1.0, 200.0);
+    await prefs.setDouble('api_speed_multiplier', _speedMultiplier);
+  }
+
   Future<void> saveAdvancedSettings({
     required double temperature,
     required int maxTokens,
@@ -184,6 +219,18 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
   int get maxTokens => _maxTokens;
   bool get useScreenCompression => _useScreenCompression;
   bool get useSystemPrompt => _useSystemPrompt;
+  double get speedMultiplier => _speedMultiplier;
+
+  /// Scales [baseDelay] down by [_speedMultiplier] (e.g. a 3s delay at 10x
+  /// becomes 300ms) while never going below [_minScaledDelay], so the
+  /// automation loop stays reliable even at the maximum 200x speed.
+  Duration scaledDelay(Duration baseDelay) {
+    if (_speedMultiplier <= 1.0) return baseDelay;
+    final scaledMicroseconds =
+        (baseDelay.inMicroseconds / _speedMultiplier).round();
+    final scaled = Duration(microseconds: scaledMicroseconds);
+    return scaled < _minScaledDelay ? _minScaledDelay : scaled;
+  }
 
   int get _effectiveMaxTokens {
     // GLM is a reasoning model. With the app's 1,024-token default it can
@@ -202,8 +249,8 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
 
   void addHistoryMessage(String role, String content) {
     _conversationHistory.add({'role': role, 'content': content});
-    if (_conversationHistory.length > 20) {
-      _conversationHistory.removeRange(0, _conversationHistory.length - 20);
+    if (_conversationHistory.length > _maxHistoryLength) {
+      _conversationHistory.removeRange(0, _conversationHistory.length - _maxHistoryLength);
     }
   }
 
@@ -216,9 +263,9 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
     // Add ONLY the text to the persistent conversation history to save tokens.
     _conversationHistory.add({'role': 'user', 'content': message});
 
-    // Keep conversation history manageable (last 20 messages)
-    if (_conversationHistory.length > 20) {
-      _conversationHistory.removeRange(0, _conversationHistory.length - 20);
+    // Keep conversation history manageable (last 6 messages) to save tokens
+    if (_conversationHistory.length > _maxHistoryLength) {
+      _conversationHistory.removeRange(0, _conversationHistory.length - _maxHistoryLength);
     }
 
     try {
@@ -258,8 +305,8 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
             headers: {
               'Content-Type': 'application/json',
               'Authorization': 'Bearer $_apiKey',
-              'HTTP-Referer': 'https://github.com/orailnoor/private-agent',
-              'X-Title': 'PrivateAgent',
+              'HTTP-Referer': 'https://github.com/Anyactor26/Nexa',
+              'X-Title': 'Nexa',
             },
             body: requestBody,
           )
@@ -330,8 +377,8 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
 
     _conversationHistory.add({'role': 'user', 'content': message});
 
-    if (_conversationHistory.length > 20) {
-      _conversationHistory.removeRange(0, _conversationHistory.length - 20);
+    if (_conversationHistory.length > _maxHistoryLength) {
+      _conversationHistory.removeRange(0, _conversationHistory.length - _maxHistoryLength);
     }
 
     try {
@@ -357,8 +404,8 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
       request.headers.addAll({
         'Content-Type': 'application/json',
         'Authorization': 'Bearer $_apiKey',
-        'HTTP-Referer': 'https://github.com/orailnoor/private-agent',
-        'X-Title': 'PrivateAgent',
+        'HTTP-Referer': 'https://github.com/Anyactor26/Nexa',
+        'X-Title': 'Nexa',
       });
 
       request.body = jsonEncode({
@@ -500,8 +547,8 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
               headers: {
                 'Content-Type': 'application/json',
                 'Authorization': 'Bearer $_apiKey',
-                'HTTP-Referer': 'https://github.com/orailnoor/private-agent',
-                'X-Title': 'PrivateAgent',
+                'HTTP-Referer': 'https://github.com/Anyactor26/Nexa',
+                'X-Title': 'Nexa',
               },
               body: jsonEncode({
                 'model': _model,
@@ -560,9 +607,9 @@ Answer questions, explain concepts, brainstorm, write emails/messages, and chat 
         int delaySeconds = 3 * currentTry;
         developer.log(
           'API call failed ($e), retrying $currentTry/$maxRetries in $delaySeconds seconds...',
-          name: 'PrivateAgent',
+          name: 'Nexa',
         );
-        await Future.delayed(Duration(seconds: delaySeconds));
+        await Future.delayed(scaledDelay(Duration(seconds: delaySeconds)));
       }
     }
   }

@@ -1,4 +1,4 @@
-package com.orailnoor.privateagent
+package com.nexa.agent
 import android.view.accessibility.AccessibilityNodeInfo
 
 fun test() {
