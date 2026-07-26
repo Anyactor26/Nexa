@@ -36,6 +36,9 @@ class DiscordService {
   String _channelId = '';
   String _authPassword = '';
   bool _isEnabled = false;
+  String? _lastError;
+  DateTime? _lastStartedAt;
+  DateTime? _lastPollAt;
 
   String? _lastMessageId;
   bool _isPolling = false;
@@ -48,14 +51,18 @@ class DiscordService {
   DiscordService(this._actionHandler, this._aiService);
 
   bool get isEnabled => _isEnabled;
+  bool get isPolling => _isPolling;
   String get botToken => _botToken;
   String get channelId => _channelId;
   String get authPassword => _authPassword;
+  String? get lastError => _lastError;
+  DateTime? get lastStartedAt => _lastStartedAt;
+  DateTime? get lastPollAt => _lastPollAt;
 
   Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
-    _botToken = prefs.getString('discord_bot_token') ?? '';
-    _channelId = prefs.getString('discord_channel_id') ?? '';
+    _botToken = _normalizeBotToken(prefs.getString('discord_bot_token') ?? '');
+    _channelId = (prefs.getString('discord_channel_id') ?? '').trim();
     _authPassword = prefs.getString('discord_auth_password') ?? '';
     _isEnabled = prefs.getBool('discord_enabled') ?? false;
 
@@ -69,9 +76,10 @@ class DiscordService {
     required String channelId,
     String? authPassword,
     required bool isEnabled,
+    bool autoStart = true,
   }) async {
-    _botToken = botToken;
-    _channelId = channelId;
+    _botToken = _normalizeBotToken(botToken);
+    _channelId = channelId.trim();
     if (authPassword != null) _authPassword = authPassword;
     _isEnabled = isEnabled;
 
@@ -81,23 +89,68 @@ class DiscordService {
     await prefs.setString('discord_auth_password', _authPassword);
     await prefs.setBool('discord_enabled', _isEnabled);
 
-    if (_isEnabled && _botToken.isNotEmpty && _channelId.isNotEmpty) {
-      startPolling();
-    } else {
+    if (_isEnabled && autoStart) {
+      if (_botToken.isNotEmpty && _channelId.isNotEmpty) {
+        startPolling();
+      } else {
+        _lastError = 'Discord bot token and channel ID are required.';
+        stopPolling();
+      }
+    } else if (!_isEnabled) {
       stopPolling();
     }
   }
 
-  void startPolling() {
-    if (_isPolling) return;
+  /// Starts the bot immediately and persists the enabled state. Returns false
+  /// with [lastError] populated when token/channel validation fails.
+  Future<bool> startBot() async {
+    _isEnabled = true;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('discord_enabled', true);
+    return _beginPolling(forceRestart: true);
+  }
+
+  /// Stops the bot immediately and persists the disabled state by default.
+  Future<void> stopBot({bool persist = true}) async {
+    _isEnabled = false;
+    _lastError = null;
+    stopPolling();
+    if (persist) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('discord_enabled', false);
+    }
+  }
+
+  void startPolling({bool forceRestart = false}) {
+    unawaited(_beginPolling(forceRestart: forceRestart));
+  }
+
+  Future<bool> _beginPolling({bool forceRestart = false}) async {
+    _lastError = null;
+    _botToken = _normalizeBotToken(_botToken);
+    _channelId = _channelId.trim();
+
+    if (_botToken.isEmpty || _channelId.isEmpty) {
+      _lastError = 'Discord bot token and channel ID are required.';
+      _isPolling = false;
+      return false;
+    }
+
+    if (_isPolling && !forceRestart) return true;
+
+    _pollingTimer?.cancel();
+    _typingTimer?.cancel();
     _isPolling = true;
-    _bootstrapAndPoll();
+    _lastStartedAt = DateTime.now();
+    return _bootstrapAndPoll();
   }
 
   void stopPolling() {
     _isPolling = false;
     _pollingTimer?.cancel();
+    _pollingTimer = null;
     _typingTimer?.cancel();
+    _typingTimer = null;
   }
 
   Map<String, String> get _headers => {
@@ -107,7 +160,7 @@ class DiscordService {
 
   /// On first start, jump straight to "now" so we don't reply to the entire
   /// channel history — then begin the normal 3s polling loop.
-  Future<void> _bootstrapAndPoll() async {
+  Future<bool> _bootstrapAndPoll() async {
     try {
       final response = await http.get(
         Uri.parse('$_apiBase/channels/$_channelId/messages?limit=1'),
@@ -118,11 +171,31 @@ class DiscordService {
         if (data.isNotEmpty) {
           _lastMessageId = data.first['id'] as String;
         }
+        _lastError = null;
+        _lastPollAt = DateTime.now();
+        unawaited(_poll());
+        return true;
       }
+
+      _lastError = _friendlyDiscordError(response.statusCode, response.body);
+      developer.log(
+        'Discord bootstrap error (${response.statusCode}): ${response.body}',
+        name: 'DiscordService',
+      );
+      if (_isFatalDiscordStatus(response.statusCode)) {
+        stopPolling();
+      } else if (_isPolling) {
+        _pollingTimer = Timer(const Duration(seconds: 5), _poll);
+      }
+      return false;
     } catch (e) {
-      developer.log('Discord bootstrap failed: $e', name: 'DiscordService');
+      _lastError = 'Discord bootstrap failed: $e';
+      developer.log(_lastError!, name: 'DiscordService');
+      if (_isPolling) {
+        _pollingTimer = Timer(const Duration(seconds: 5), _poll);
+      }
+      return false;
     }
-    _poll();
   }
 
   Future<void> _poll() async {
@@ -138,6 +211,8 @@ class DiscordService {
       );
 
       if (response.statusCode == 200) {
+        _lastError = null;
+        _lastPollAt = DateTime.now();
         final data = jsonDecode(response.body) as List;
         if (data.isNotEmpty) {
           // Discord returns newest → oldest; process chronologically.
@@ -161,15 +236,22 @@ class DiscordService {
         // Rate limited — back off a bit longer next tick.
         final body = jsonDecode(response.body);
         final retryAfter = (body['retry_after'] as num?)?.toDouble() ?? 1.0;
+        _lastError = 'Discord rate limited Nexa; retrying in ${retryAfter.toStringAsFixed(1)}s.';
         await Future.delayed(Duration(milliseconds: (retryAfter * 1000).round()));
       } else {
+        _lastError = _friendlyDiscordError(response.statusCode, response.body);
         developer.log(
           'Discord poll error (${response.statusCode}): ${response.body}',
           name: 'DiscordService',
         );
+        if (_isFatalDiscordStatus(response.statusCode)) {
+          stopPolling();
+          return;
+        }
       }
     } catch (e) {
-      developer.log('Discord polling error: $e', name: 'DiscordService');
+      _lastError = 'Discord polling error: $e';
+      developer.log(_lastError!, name: 'DiscordService');
     }
 
     if (_isPolling) {
@@ -466,6 +548,46 @@ class DiscordService {
       );
     } catch (_) {
       // Non-critical — ignore.
+    }
+  }
+
+  static String _normalizeBotToken(String token) {
+    var cleaned = token.trim();
+    if (cleaned.length >= 2 &&
+        ((cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+            (cleaned.startsWith("'") && cleaned.endsWith("'")))) {
+      cleaned = cleaned.substring(1, cleaned.length - 1).trim();
+    }
+    if (cleaned.toLowerCase().startsWith('bot ')) {
+      cleaned = cleaned.substring(4).trim();
+    }
+    return cleaned;
+  }
+
+  static bool _isFatalDiscordStatus(int statusCode) {
+    return statusCode == 401 || statusCode == 403 || statusCode == 404;
+  }
+
+  static String _friendlyDiscordError(int statusCode, String body) {
+    String details = body;
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) {
+        details = decoded['message']?.toString() ?? body;
+      }
+    } catch (_) {}
+
+    switch (statusCode) {
+      case 401:
+        return 'Discord rejected the bot token. Paste only the token value (without a leading "Bot ") and try Start Bot again.';
+      case 403:
+        return 'Discord denied access to this channel. Invite the bot with Read Message History, View Channel, Send Messages, and Embed Links permissions.';
+      case 404:
+        return 'Discord channel not found. Check the Channel ID and make sure the bot is in that server/channel.';
+      case 429:
+        return 'Discord rate limited the bot. Nexa will retry automatically.';
+      default:
+        return 'Discord error $statusCode: $details';
     }
   }
 

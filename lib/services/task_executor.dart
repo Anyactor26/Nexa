@@ -582,14 +582,16 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
           await _screenService.pressBack();
         } else if (recovery.action == 'scroll') {
           final dir = recovery.params['direction'] ?? 'down';
-          if (dir == 'down') {
-            await _shizukuService.runCommand(
-              'input swipe 540 1800 540 600 600',
-            );
-          } else {
-            await _shizukuService.runCommand(
-              'input swipe 540 600 540 1800 600',
-            );
+          if (!await _screenService.scroll(dir)) {
+            if (dir == 'down') {
+              await _shizukuService.runCommand(
+                'input swipe 540 1800 540 600 600',
+              );
+            } else {
+              await _shizukuService.runCommand(
+                'input swipe 540 600 540 1800 600',
+              );
+            }
           }
         } else if (recovery.action == 'press_home') {
           await _screenService.pressHome();
@@ -663,14 +665,11 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
   Future<bool> _submitKeyboardAction() async {
     if (await _screenService.pressEnter()) return true;
 
-    final shizukuAvailable = await _shizukuService.checkAvailability();
-    if (!shizukuAvailable) return false;
-
+    // Last-resort native shell fallback. This no longer requires Shizuku or
+    // Termux; Android may deny `input` for normal app UIDs, in which case we
+    // simply report failure and let the recovery loop continue.
     final result = await _shizukuService.runCommand('input keyevent 66');
-    final normalized = result.toLowerCase();
-    return !normalized.contains('not running') &&
-        !normalized.contains('permission denied') &&
-        !normalized.startsWith('error');
+    return _shellCommandSucceeded(result);
   }
 
   Future<bool> _performScroll(String direction) async {
@@ -688,17 +687,22 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
   ) async {
     if (await _screenService.swipe(startX, startY, endX, endY)) return true;
 
-    final shizukuAvailable = await _shizukuService.checkAvailability();
-    if (!shizukuAvailable) return false;
-
+    // Last-resort native shell fallback. No Shizuku/Termux dependency.
     final result = await _shizukuService.runCommand(
       'input swipe ${startX.toInt()} ${startY.toInt()} '
       '${endX.toInt()} ${endY.toInt()} 600',
     );
+    return _shellCommandSucceeded(result);
+  }
+
+  bool _shellCommandSucceeded(String result) {
     final normalized = result.toLowerCase();
-    return !normalized.contains('not running') &&
+    return normalized.contains('exited with code 0') &&
         !normalized.contains('permission denied') &&
-        !normalized.startsWith('error');
+        !normalized.contains('securityexception') &&
+        !normalized.contains('operation not permitted') &&
+        !normalized.contains('not allowed') &&
+        !normalized.contains('timed out');
   }
 
   /// Replays a saved skill without using the LLM
