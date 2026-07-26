@@ -1,5 +1,6 @@
 package com.nexa.agent
 
+import android.accessibilityservice.GestureDescription
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -38,6 +39,7 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         const val ACTION_STOP = "com.nexa.agent.STOP_WAKE_WORD"
         const val EXTRA_WAKE_WORD_DETECTED = "wake_word_detected"
         const val EXTRA_TRAILING_TEXT = "trailing_text"
+        const val EXTRA_DISMISS_KEYGUARD = "dismiss_keyguard"
 
         // Known wake phrase variants (matching Dart-side patterns)
         val WAKE_PHRASES = listOf(
@@ -77,6 +79,17 @@ class WakeWordForegroundService : Service(), RecognitionListener {
             return START_NOT_STICKY
         }
 
+        // Always promote to the foreground before doing anything else. If we
+        // were launched with startForegroundService() and fail to call
+        // startForeground() within ~5s, Android kills the process with a
+        // ForegroundServiceDidNotStartInTimeException.
+        if (!enterForeground()) {
+            // Microphone FGS can be refused (e.g. permission revoked, or a
+            // background start on Android 12+). Nothing else is safe to do.
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         // Handle lock/unlock commands from the service layer
         if (intent?.action == ACTION_LOCK_SCREEN) {
             lockScreen()
@@ -87,18 +100,31 @@ class WakeWordForegroundService : Service(), RecognitionListener {
             return START_STICKY
         }
 
-        // Start as foreground service with persistent notification
-        val notification = buildNotification("Listening for \"Hey Nexa\"…")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
-
         // Start listening
         startListening()
         return START_STICKY  // Restart if killed by the system
+    }
+
+    /// Promotes the service to the foreground with the persistent notification.
+    /// Returns false when the platform refuses the start (missing RECORD_AUDIO,
+    /// background-start restrictions on Android 12+, etc.) so callers can bail
+    /// out instead of crashing.
+    private fun enterForeground(): Boolean {
+        return try {
+            val notification = buildNotification("Listening for \"Hey Nexa\"…")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID, notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not enter foreground: ${e.message}")
+            false
+        }
     }
 
     override fun onDestroy() {
@@ -130,49 +156,50 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         }
     }
 
-    /// Wakes and unlocks the screen. This uses the accessibility service
-    /// to wake the screen (power keyevent) and then dismiss the keyguard
-    /// (GLOBAL_ACTION_DISMISS_KEYGUARD on API 28+).
-    /// Requires the accessibility service to be enabled.
+    /// Wakes and unlocks the screen: presses power to wake, optionally swipes
+    /// up via the accessibility service (for swipe-only keyguards), then
+    /// launches MainActivity, which requests a proper keyguard dismissal via
+    /// KeyguardManager.requestDismissKeyguard().
     private fun unlockScreen() {
         Log.d(TAG, "Unlocking screen")
         try {
             // First: wake the screen by pressing power
             Runtime.getRuntime().exec(arrayOf("/system/bin/sh", "-c", "input keyevent 26"))
-            Thread.sleep(500) // Wait for screen to wake
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to wake screen: ${e.message}")
+        }
+        // onStartCommand runs on the main thread — never Thread.sleep() here or
+        // the service ANRs. Continue after the screen has had time to wake.
+        handler.postDelayed({ finishUnlock() }, 500)
+    }
 
-            // Then: dismiss the keyguard using accessibility service
+    private fun finishUnlock() {
+        try {
+            // Try a swipe-up gesture to dismiss a swipe-only keyguard.
+            // There is no public accessibility global action for dismissing the
+            // keyguard, so secure keyguards are handled by MainActivity through
+            // KeyguardManager.requestDismissKeyguard().
             val service = AgentAccessibilityService.instance
             if (service != null) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    // GLOBAL_ACTION_DISMISS_KEYGUARD requires the service to be
-                    // declared with FLAG_REQUEST_DISMISS_KEYGUARD in its metadata.
-                    service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_DISMISS_KEYGUARD)
-                    Log.d(TAG, "Dismissed keyguard via accessibility service")
-                } else {
-                    // Pre-API 28: swipe up gesture to unlock
-                    val path = android.graphics.Path()
-                    path.moveTo(540f, 1800f)
-                    path.lineTo(540f, 300f)
-                    val gesture = android.accessibilityservice.AccessibilityService.GestureDescription(
-                        path, 0, 500
-                    )
-                    service.dispatchGesture(gesture, null, null)
-                    Log.d(TAG, "Attempted unlock via swipe gesture")
-                }
-
-                // Also launch Nexa app to foreground
-                val launchIntent = Intent(this, MainActivity::class.java)
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                startActivity(launchIntent)
+                val metrics = resources.displayMetrics
+                val x = metrics.widthPixels / 2f
+                val path = android.graphics.Path()
+                path.moveTo(x, metrics.heightPixels * 0.9f)
+                path.lineTo(x, metrics.heightPixels * 0.15f)
+                val gesture = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0, 500))
+                    .build()
+                service.dispatchGesture(gesture, null, null)
+                Log.d(TAG, "Attempted unlock via swipe gesture")
             } else {
-                // No accessibility service — wake the screen at least
-                // (can't dismiss keyguard without accessibility)
-                Log.w(TAG, "Accessibility service not running — can only wake screen, not dismiss keyguard")
-                val launchIntent = Intent(this, MainActivity::class.java)
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                startActivity(launchIntent)
+                Log.w(TAG, "Accessibility service not running — cannot swipe to unlock")
             }
+
+            // Launch Nexa, asking it to show over the keyguard and dismiss it.
+            val launchIntent = Intent(this, MainActivity::class.java)
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            launchIntent.putExtra(EXTRA_DISMISS_KEYGUARD, true)
+            startActivity(launchIntent)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to unlock screen: ${e.message}")
         }
@@ -191,7 +218,7 @@ class WakeWordForegroundService : Service(), RecognitionListener {
 
             val listenIntent = Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             listenIntent.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                android.speech.RecognizerIntent.LANG_MODEL_FREE_FORM)
+                android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             listenIntent.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "en-US")
             listenIntent.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-US")
             listenIntent.putExtra(android.speech.RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
@@ -321,14 +348,20 @@ class WakeWordForegroundService : Service(), RecognitionListener {
             .replace(Regex("\\s+"), " ")
             .trim()
 
+        // NOTE: offsets from `normalized` must not be applied to `text` — the
+        // lowercase/punctuation/whitespace collapsing shifts them. Slice the
+        // normalized string, which is also what the Dart side consumes.
+        var best = -1
+        var bestEnd = 0
         for (phrase in WAKE_PHRASES) {
             val idx = normalized.indexOf(phrase)
-            if (idx >= 0) {
-                val originalAfterWake = text.substring(
-                    minOf(idx + phrase.length, text.length)
-                ).trim()
-                return originalAfterWake
+            if (idx >= 0 && (best == -1 || idx < best)) {
+                best = idx
+                bestEnd = idx + phrase.length
             }
+        }
+        if (best >= 0) {
+            return normalized.substring(minOf(bestEnd, normalized.length)).trim()
         }
         return ""
     }
