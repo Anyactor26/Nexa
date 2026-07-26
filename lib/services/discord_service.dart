@@ -31,6 +31,7 @@ class DiscordService {
   static const int _colorSuccess = 0x22C55E; // green — success
   static const int _colorError = 0xEF4444; // red — error
   static const int _colorLocked = 0x64748B; // slate — auth required
+  static const int _colorStream = 0x38BDF8; // sky — screenshare stream
 
   final ActionHandler _actionHandler;
   final AiService _aiService;
@@ -73,6 +74,7 @@ class DiscordService {
   String? get lastError => _lastError;
   DateTime? get lastStartedAt => _lastStartedAt;
   DateTime? get lastPollAt => _lastPollAt;
+  RemotePhoneControlService get remoteControl => _remoteControl;
 
   Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
@@ -129,6 +131,8 @@ class DiscordService {
   Future<void> stopBot({bool persist = true}) async {
     _isEnabled = false;
     _lastError = null;
+    // Stop any active screenshare streams too
+    _remoteControl.screenshare.stopStream('discord', reason: 'Bot stopped');
     stopPolling();
     if (persist) {
       final prefs = await SharedPreferences.getInstance();
@@ -317,7 +321,7 @@ class DiscordService {
     // Commands starting with / are handled by the remote control service
     // which can see and control the phone like a real user.
     if (command.startsWith('/')) {
-      await _handleRemoteControl(username, command);
+      await _handleRemoteControl(userId, username, command);
       return;
     }
 
@@ -373,12 +377,17 @@ class DiscordService {
         },
         {
           'name': '👀 See the phone',
-          'value': '```!nexa /screenshot``` → screenshot image\n```!nexa /screen``` → screen text',
+          'value': '```!nexa /screenshot``` → screenshot image\n```!nexa /screen``` → screen text\n```!nexa /stream [seconds]``` → live screenshare\n```!nexa /stopstream``` → end stream',
           'inline': false,
         },
         {
           'name': '👆 Control the phone',
-          'value': '```!nexa /tap Settings``` /tap_at /type /scroll\n```!nexa /press_back``` /press_home /press_enter\n```!nexa /open YouTube```',
+          'value': '```!nexa /tap Settings``` → tap by text\n```!nexa /tap_at 540 800``` → tap at coords\n```!nexa /long_press WiFi``` → long press\n```!nexa /long_press_at 540 800``` → long press at coords\n```!nexa /double_tap_at 540 800``` → double tap\n```!nexa /type Hello``` → type text\n```!nexa /scroll down``` → scroll\n```!nexa /swipe 540 1800 540 300``` → custom swipe',
+          'inline': false,
+        },
+        {
+          'name': '📱 System',
+          'value': '```!nexa /press_back``` ```!nexa /press_home``` ```!nexa /press_enter```\n```!nexa /open YouTube``` → open app\n```!nexa /notifications``` → open notifications\n```!nexa /recent_apps``` → recent apps',
           'inline': false,
         },
         {
@@ -400,10 +409,32 @@ class DiscordService {
     ));
   }
 
-  /// Handles remote control commands (/screenshot, /tap, etc.)
-  Future<void> _handleRemoteControl(String username, String command) async {
+  /// Handles remote control commands (/screenshot, /tap, /stream, etc.)
+  Future<void> _handleRemoteControl(String userId, String username, String command) async {
     _startTypingLoop();
 
+    // ─── Screenshare stream commands ──────────────────────────────────
+    final lowerCmd = command.toLowerCase().split(RegExp(r'\s+')).first;
+    if (lowerCmd == '/stream' || lowerCmd == '/screenshare' || lowerCmd == '/live') {
+      await _startScreenshare(username, command);
+      _stopTypingLoop();
+      return;
+    }
+
+    if (command.toLowerCase() == '/stopstream' ||
+        command.toLowerCase() == '/stopscreenshare' ||
+        command.toLowerCase() == '/stoplive') {
+      _remoteControl.screenshare.stopStream('discord', reason: 'User stopped');
+      await _sendEmbed(_embed(
+        title: '📺 Screenshare stopped',
+        description: 'Stream ended by **$username**.',
+        color: _colorAccent,
+      ));
+      _stopTypingLoop();
+      return;
+    }
+
+    // ─── Non-stream commands ──────────────────────────────────────────
     final messageId = await _sendEmbed(_embed(
       title: '📱 Remote control…',
       description: '**Command:** $command',
@@ -415,7 +446,10 @@ class DiscordService {
     ));
 
     try {
-      final result = await _remoteControl.handleCommand(command);
+      final result = await _remoteControl.handleCommand(
+        command,
+        platform: 'discord',
+      );
 
       if (result.isImage && result.success) {
         // Send the screenshot as a file attachment to Discord
@@ -466,13 +500,94 @@ class DiscordService {
     }
   }
 
+  // ─── Screenshare ──────────────────────────────────────────────────────
+
+  /// Starts a live screenshare stream that continuously pushes screenshots
+  /// to the Discord channel.
+  Future<void> _startScreenshare(String username, String command) async {
+    // Parse interval from command: /stream 5 → 5s, /stream → 3s
+    final parts = command.split(RegExp(r'\s+'));
+    final intervalSeconds = parts.length > 1
+        ? (int.tryParse(parts[1]) ?? 3)
+        : 3;
+
+    if (intervalSeconds < 1 || intervalSeconds > 30) {
+      await _sendEmbed(_embed(
+        title: '❌ Invalid interval',
+        description: 'Interval must be 1–30 seconds. Usage: `!nexa /stream [seconds]`',
+        color: _colorError,
+      ));
+      return;
+    }
+
+    // Note: startStream() automatically stops any existing stream for
+    // this platform without firing its onStopped callback (suppressed
+    // for replaced streams). We don't need to manually stop first.
+
+    await _sendEmbed(_embed(
+      title: '📺 Screenshare starting…',
+      description: '**$username** started a live screen stream at **${intervalSeconds}s** intervals.\n'
+          'Screenshots will be sent as image files every ${intervalSeconds}s.\n'
+          'Control commands still work — auto-snap after each action!\n\n'
+          'Send `!nexa /stopstream` to end.',
+      color: _colorStream,
+      fields: [
+        {'name': 'Interval', 'value': '${intervalSeconds}s', 'inline': true},
+        {'name': 'Started by', 'value': username, 'inline': true},
+      ],
+    ));
+
+    // Start the screenshare directly via ScreenshareService (don't go through
+    // handleCommand again — we already parsed the /stream command here)
+    _remoteControl.screenshare.startStream(
+      platform: 'discord',
+      sender: _screenshareSender,
+      intervalSeconds: intervalSeconds,
+      onStopped: (reason) {
+        _sendEmbed(_embed(
+          title: '📺 Screenshare ended',
+          description: 'Stream stopped: $reason',
+          color: _colorAccent,
+        ));
+      },
+    );
+  }
+
+  /// Sends a single screenshare frame as a Discord file attachment.
+  Future<void> _screenshareSender(String base64Data) async {
+    if (_botToken.isEmpty || _channelId.isEmpty) return;
+    try {
+      final bytes = base64Decode(base64Data);
+      final timestamp = DateTime.now().toUtc();
+      final timeStr = '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}:${timestamp.second.toString().padLeft(2, '0')}';
+      final filename = 'nexa_stream_${timestamp.toIso8601String().replaceAll(':', '-').replaceAll('.', '')}.jpg';
+
+      final uri = Uri.parse('$_apiBase/channels/$_channelId/messages');
+      final request = http.MultipartRequest('POST', uri);
+      request.headers['Authorization'] = 'Bot $_botToken';
+      request.files.add(http.MultipartFile.fromBytes(filename, bytes, filename: filename));
+      request.fields['content'] = '📺 Screen @ $timeStr';
+
+      final response = await request.send();
+      if (response.statusCode != 200 && response.statusCode != 201) {
+        final responseBody = await response.stream.bytesToString();
+        developer.log(
+          'Screenshare frame send failed (${response.statusCode}): $responseBody',
+          name: 'DiscordService',
+        );
+      }
+    } catch (e) {
+      developer.log('Screenshare frame error: $e', name: 'DiscordService');
+    }
+  }
+
   /// Sends a base64-encoded screenshot as a file attachment to Discord.
   Future<void> _sendScreenshotAsFile(String base64Data, String commandLabel) async {
     if (_botToken.isEmpty || _channelId.isEmpty) return;
     try {
       final bytes = base64Decode(base64Data);
       final timestamp = DateTime.now().toUtc().toIso8601String().replaceAll(':', '-').replaceAll('.', '');
-      final filename = 'nexa_screen_$timestamp.png';
+      final filename = 'nexa_screen_$timestamp.jpg';
 
       // Discord file upload requires multipart form data
       final uri = Uri.parse('$_apiBase/channels/$_channelId/messages');
@@ -488,11 +603,12 @@ class DiscordService {
           'Failed to send screenshot to Discord (${response.statusCode}): $responseBody',
           name: 'DiscordService',
         );
-        // Fallback: send as text embed with truncated base64
+        // Fallback: send as text embed with screen text description
+        final screenText = await _screenService.getScreenDescription();
         await _sendEmbed(_embed(
-          title: '📸 Screenshot',
-          description: 'Screenshot taken (${bytes.length} bytes) but file upload failed. Screen text below:',
-          color: _colorAccent,
+          title: '📸 Screenshot (file upload failed)',
+          description: screenText.length > 3800 ? '${screenText.substring(0, 3800)}…' : screenText,
+          color: _colorWorking,
         ));
       }
     } catch (e) {
@@ -521,6 +637,11 @@ class DiscordService {
   }
 
   Future<void> _sendStatus(String username) async {
+    final streamInfo = _remoteControl.screenshare.activeStreams();
+    final streamStatus = streamInfo.isNotEmpty
+        ? streamInfo.entries.map((e) => '${e.key}: ${e.value}').join('\n')
+        : 'No active streams';
+
     await _sendEmbed(_embed(
       title: '📡 Nexa is online',
       description: 'Requested by **$username**',
@@ -531,6 +652,11 @@ class DiscordService {
           'name': 'Authenticated users',
           'value': '${_authenticatedUsers.length}',
           'inline': true,
+        },
+        {
+          'name': 'Screenshare',
+          'value': streamStatus,
+          'inline': false,
         },
       ],
     ));
@@ -755,6 +881,7 @@ class DiscordService {
   }
 
   void dispose() {
+    _remoteControl.screenshare.stopStream('discord', reason: 'Service disposed');
     stopPolling();
   }
 }

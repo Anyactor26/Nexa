@@ -1,7 +1,9 @@
 package com.nexa.agent
 
 import android.content.Intent
+import android.os.Build
 import android.provider.Settings
+import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -369,6 +371,17 @@ class MainActivity : FlutterActivity() {
                                 result.error("SERVICE_NOT_RUNNING", "Accessibility service is not running", null)
                             } else {
                                 result.success(service.pressHome())
+                            }
+                        }
+
+                        "longPressAt" -> {
+                            val x = call.argument<Double>("x")?.toFloat() ?: 0f
+                            val y = call.argument<Double>("y")?.toFloat() ?: 0f
+                            val service = AgentAccessibilityService.instance
+                            if (service == null) {
+                                result.error("SERVICE_NOT_RUNNING", "Accessibility service is not running", null)
+                            } else {
+                                result.success(service.longPressAt(x, y))
                             }
                         }
 

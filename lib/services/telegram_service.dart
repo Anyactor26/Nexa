@@ -39,6 +39,7 @@ class TelegramService {
 
   String get botToken => _botToken;
   bool get isEnabled => _isEnabled;
+  RemotePhoneControlService get remoteControl => _remoteControl;
 
   Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
@@ -82,6 +83,7 @@ class TelegramService {
   void stopPolling() {
     _isPolling = false;
     _pollingTimer?.cancel();
+    _remoteControl.screenshare.stopStream('telegram', reason: 'Bot stopped');
   }
 
   Future<void> _pollUpdates() async {
@@ -142,6 +144,13 @@ class TelegramService {
       return;
     }
 
+    // ─── Help — always available even without auth ──────────────────────
+
+    if (text == '/help' || text == '/start') {
+      await _sendMessage(chatId, _getHelpText(), isHtml: true);
+      return;
+    }
+
     // ─── Require auth for all other commands ────────────────────────────
 
     if (_authPassword.isNotEmpty && !_authenticatedChats.contains(chatId)) {
@@ -149,23 +158,36 @@ class TelegramService {
       return;
     }
 
-    // ─── Help ────────────────────────────────────────────────────────────
-
-    if (text == '/help' || text == '/start') {
-      await _sendMessage(chatId, _getHelpText());
-      return;
-    }
-
     // ─── Status ──────────────────────────────────────────────────────────
 
     if (text == '/status') {
-      await _sendMessage(chatId, '✅ Nexa is online and listening.');
+      final streamInfo = _remoteControl.screenshare.activeStreams();
+      final streamStatus = streamInfo.isNotEmpty
+          ? streamInfo.entries.map((e) => '${e.key}: ${e.value}').join('\n')
+          : 'No active streams';
+      await _sendMessage(chatId, '✅ Nexa is online and listening.\n\n<b>Screenshare:</b> $streamStatus', isHtml: true);
+      return;
+    }
+
+    // ─── Screenshare stream commands ─────────────────────────────────────
+
+    final lowerFirstWord = text.toLowerCase().split(RegExp(r'\s+')).first;
+    if (lowerFirstWord == '/stream' || lowerFirstWord == '/screenshare' || lowerFirstWord == '/live') {
+      await _startScreenshare(chatId, text);
+      return;
+    }
+
+    if (text.toLowerCase() == '/stopstream' ||
+        text.toLowerCase() == '/stopscreenshare' ||
+        text.toLowerCase() == '/stoplive') {
+      _remoteControl.screenshare.stopStream('telegram', reason: 'User stopped');
+      await _sendMessage(chatId, '📺 Screenshare stopped.');
       return;
     }
 
     // ─── Remote Phone Control ────────────────────────────────────────────
 
-    // Commands starting with / (except /auth, /help, /status) are remote control
+    // Commands starting with / (except /auth, /help, /status, /stream variants) are remote control
     if (text.startsWith('/')) {
       await _handleRemoteControl(chatId, text);
       return;
@@ -199,13 +221,75 @@ class TelegramService {
     }
   }
 
+  // ─── Screenshare ──────────────────────────────────────────────────────
+
+  Future<void> _startScreenshare(String chatId, String command) async {
+    // Parse interval from command: /stream 5 → 5s, /stream → 3s
+    final parts = command.split(RegExp(r'\s+'));
+    final intervalSeconds = parts.length > 1
+        ? (int.tryParse(parts[1]) ?? 3)
+        : 3;
+
+    if (intervalSeconds < 1 || intervalSeconds > 30) {
+      await _sendMessage(chatId, '❌ Interval must be 1–30 seconds. Usage: /stream [seconds]');
+      return;
+    }
+
+    // Note: startStream() automatically stops any existing stream for
+    // this platform without firing its onStopped callback (suppressed
+    // for replaced streams). We don't need to manually stop first.
+
+    await _sendMessage(chatId, '📺 <b>Screenshare starting!</b>\nStreaming every ${intervalSeconds}s.\nControl commands still work — auto-snap after each action!\n\nSend /stopstream to end.', isHtml: true);
+
+    // Start the screenshare directly via ScreenshareService (don't go
+    // through handleCommand again — we already parsed /stream here)
+    _remoteControl.screenshare.startStream(
+      platform: 'telegram',
+      sender: (base64Data) => _screenshareSender(chatId, base64Data),
+      intervalSeconds: intervalSeconds,
+      onStopped: (reason) {
+        _sendMessage(chatId, '📺 Screenshare ended: $reason');
+      },
+    );
+  }
+
+  /// Sends a single screenshare frame as a photo to Telegram.
+  Future<void> _screenshareSender(String chatId, String base64Data) async {
+    if (_botToken.isEmpty) return;
+    try {
+      final bytes = base64Decode(base64Data);
+      final timestamp = DateTime.now().toUtc();
+      final timeStr = '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}:${timestamp.second.toString().padLeft(2, '0')}';
+
+      final uri = Uri.parse('https://api.telegram.org/bot$_botToken/sendPhoto');
+      final request = http.MultipartRequest('POST', uri);
+      request.fields['chat_id'] = chatId;
+      request.fields['caption'] = '📺 Screen @ $timeStr';
+      request.files.add(http.MultipartFile.fromBytes('photo', bytes, filename: 'nexa_stream.jpg'));
+
+      final response = await request.send();
+      if (response.statusCode != 200) {
+        final responseBody = await response.stream.bytesToString();
+        developer.log(
+          'Screenshare frame send failed (${response.statusCode}): $responseBody',
+          name: 'TelegramService',
+        );
+      }
+    } catch (e) {
+      developer.log('Screenshare frame error: $e', name: 'TelegramService');
+    }
+  }
+
   // ─── Remote Phone Control ──────────────────────────────────────────────
 
   Future<void> _handleRemoteControl(String chatId, String command) async {
     await _sendMessage(chatId, '📱 Executing: $command...');
 
     try {
-      final result = await _remoteControl.handleCommand(command);
+      final result = await _remoteControl.handleCommand(
+        command,
+        platform: 'telegram',
+      );
 
       if (result.isImage && result.success) {
         // Send screenshot as a photo to Telegram
@@ -233,7 +317,7 @@ class TelegramService {
       final request = http.MultipartRequest('POST', uri);
       request.fields['chat_id'] = chatId;
       request.fields['caption'] = '📸 Screenshot — $commandLabel';
-      request.files.add(http.MultipartFile.fromBytes('photo', bytes, filename: 'nexa_screen.png'));
+      request.files.add(http.MultipartFile.fromBytes('photo', bytes, filename: 'nexa_screen.jpg'));
 
       final response = await request.send();
       final responseBody = await response.stream.bytesToString();
@@ -254,17 +338,30 @@ class TelegramService {
 
   // ─── Telegram API ──────────────────────────────────────────────────────
 
-  Future<void> _sendMessage(String chatId, String text) async {
+  /// Escapes text for Telegram's HTML parse mode.
+  /// Only < > & need escaping; bold is <b>, italic <i>.
+  static String _escapeHtml(String text) {
+    return text
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
+  }
+
+  /// Sends a message to Telegram. If [isHtml] is true, the text is sent
+  /// as-is (it must already be valid Telegram HTML). Otherwise, the text
+  /// is HTML-escaped to prevent special characters breaking the parse mode.
+  Future<void> _sendMessage(String chatId, String text, {bool isHtml = false}) async {
     if (_botToken.isEmpty) return;
     try {
+      final htmlText = isHtml ? text : _escapeHtml(text);
       final url = Uri.parse('https://api.telegram.org/bot$_botToken/sendMessage');
       await http.post(
         url,
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'chat_id': chatId,
-          'text': text,
-          'parse_mode': 'Markdown',
+          'text': htmlText,
+          'parse_mode': 'HTML',
         }),
       );
     } catch (e) {
@@ -273,40 +370,55 @@ class TelegramService {
   }
 
   static String _getHelpText() {
-    return '''*🤖 Nexa Remote Phone Control*
+    return '''<b>🤖 Nexa Remote Phone Control</b>
 
-See & control this phone like you're holding it — from anywhere.
+See &amp; control this phone like you're holding it — from anywhere.
 
-*🔐 Auth:*
+<b>🔐 Auth:</b>
 /auth <password> — Authenticate (required first)
 
-*👀 See:*
+<b>👀 See:</b>
 /screenshot — Take a screenshot (sent as image)
 /screen — Read what's on screen
+/stream [seconds] — Start live screenshare (default 3s)
+/stopstream — Stop screenshare
 
-*👆 Control:*
+<b>👆 Control:</b>
 /tap <text> — Tap an element
 /tap_at <x> <y> — Tap at coordinates
+/long_press <text> — Long press an element
+/long_press_at <x> <y> — Long press at coordinates
+/double_tap_at <x> <y> — Double tap at coordinates
 /type <text> — Type text
 /scroll up|down — Scroll
+/swipe <sx> <sy> <ex> <ey> — Custom swipe
 /press_back — Back button
 /press_home — Home button
 /press_enter — Enter key
 /open <app> — Open an app
+/notifications — Open notifications
+/recent_apps — Open recent apps
 
-*🔒 Lock/Unlock:*
+<b>🔒 Lock/Unlock:</b>
 /lock — Lock screen
-/unlock — Wake & unlock
+/unlock — Wake &amp; unlock
 
-*⚡ Shell:*
+<b>⚡ Shell:</b>
 /shell <cmd> — Run shell command
 
-*🤖 AI:*
+<b>🤖 AI:</b>
 Just type any command without / — Nexa handles it!
-/run <what you want> — Natural language command''';
+/run <what you want> — Natural language command
+
+<b>💡 Pro tips:</b>
+1. Use /stream for a live screenshare — see the phone updating in real-time!
+2. Control commands auto-snap the screen if a stream is active
+3. Use /screenshot for a single snapshot
+4. Use /screen for faster text-only view''';
   }
 
   void dispose() {
+    _remoteControl.screenshare.stopStream('telegram', reason: 'Service disposed');
     stopPolling();
   }
 }

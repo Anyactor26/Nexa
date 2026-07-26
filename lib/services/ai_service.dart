@@ -136,6 +136,12 @@ PHONE LOCK/UNLOCK:
 Use lock_screen when someone says "lock my phone", "lock the screen", etc.
 Use unlock_screen when someone says "unlock my phone", "wake up the phone", "turn on the screen", etc.
 
+SCREENSHARE (live remote view):
+- screenshare: {"seconds": 3} - Start a live screenshare stream that continuously pushes screenshots to Discord/Telegram at the specified interval (1-30 seconds). The user sees the phone screen updating in real-time. Control commands auto-snap after actions during a stream.
+- stop_screenshare: {} - Stop the active screenshare stream
+
+Use screenshare when someone says "show me my phone", "stream my screen", "start a screenshare", "let me see my phone live", etc.
+
 CODING WORKFLOW EXAMPLES:
 - "Write a Python script that prints hello" → create_file with path=/sdcard/NexaAgent/hello.py, content=print('hello')
 - "Create a web app with index.html" → create_file with the HTML content

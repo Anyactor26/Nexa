@@ -116,22 +116,12 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         try {
             // Use the accessibility service if available for a more reliable lock
             val service = AgentAccessibilityService.instance
-            if (service != null) {
+            if (service != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 // Accessibility service can perform GLOBAL_ACTION_LOCK_SCREEN on API 28+
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
-                    Log.d(TAG, "Locked screen via accessibility GLOBAL_ACTION_LOCK_SCREEN")
-                } else {
-                    // Pre-API 28: use power keyevent via accessibility dispatchGesture or shell
-                    service.dispatchGesture(android.accessibilityservice.AccessibilityService.GestureDescription(
-                        android.graphics.Path(), 0, 0
-                    ), null, null)
-                    // Fallback: shell command
-                    Runtime.getRuntime().exec(arrayOf("/system/bin/sh", "-c", "input keyevent 26"))
-                    Log.d(TAG, "Locked screen via power keyevent (fallback)")
-                }
+                service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
+                Log.d(TAG, "Locked screen via accessibility GLOBAL_ACTION_LOCK_SCREEN")
             } else {
-                // No accessibility service — use shell command from FG service
+                // No accessibility service or pre-API 28 — use shell command
                 Runtime.getRuntime().exec(arrayOf("/system/bin/sh", "-c", "input keyevent 26"))
                 Log.d(TAG, "Locked screen via shell power keyevent")
             }

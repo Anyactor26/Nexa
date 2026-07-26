@@ -42,5 +42,8 @@ class AgentAction {
     // ─── Phone Lock/Unlock ───────────────────────────────────────────────
     'lock_screen',      // Lock the phone screen (power button)
     'unlock_screen',    // Wake and unlock the phone screen
+    // ─── Screenshare (live remote view) ──────────────────────────────────
+    'screenshare',      // Start a live screenshare stream
+    'stop_screenshare', // Stop the active screenshare
   ];
 }

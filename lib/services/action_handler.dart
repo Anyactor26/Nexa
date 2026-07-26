@@ -8,10 +8,8 @@ import 'system_control_service.dart';
 import 'shizuku_service.dart';
 import 'file_operation_service.dart';
 import 'screen_automation_service.dart';
-import 'remote_phone_control_service.dart';
 import 'task_executor.dart';
 import 'ai_service.dart';
-import 'file_operation_service.dart';
 
 class ActionHandler {
   final AppLauncherService _appLauncher = AppLauncherService();
@@ -288,7 +286,7 @@ class ActionHandler {
 
         case 'lock_screen':
           // Press power button via shell to lock screen
-          final lockResult = await _shizuku.runCommand('input keyevent 26');
+          await _shizuku.runCommand('input keyevent 26');
           result = 'Screen locked. (Power button pressed)';
           break;
 
@@ -299,6 +297,22 @@ class ActionHandler {
           // 2. Swipe up to dismiss keyguard
           await _screenAutomation.swipe(540, 1800, 540, 300);
           result = 'Screen unlocked. (Power + swipe up)\nNote: PIN/pattern locks need manual entry.';
+          break;
+
+        // ─── Screenshare (live remote view) ──────────────────────────────
+
+        case 'screenshare':
+          // Screenshare is handled by the remote control service directly,
+          // not here — the action is listed for the AI to recognize, but
+          // actual stream management goes through ScreenshareService.
+          final seconds = (action.params['seconds'] as num?)?.toInt() ?? 3;
+          result = 'Screenshare can only be started via Discord/Telegram remote control. '
+              'Use /stream $seconds in your bot channel to start a live stream.';
+          break;
+
+        case 'stop_screenshare':
+          result = 'Screenshare can only be stopped via Discord/Telegram remote control. '
+              'Use /stopstream in your bot channel to end the stream.';
           break;
 
         default:
