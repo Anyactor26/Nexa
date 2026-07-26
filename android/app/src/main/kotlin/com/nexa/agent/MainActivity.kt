@@ -1,5 +1,7 @@
 package com.nexa.agent
 
+import android.app.KeyguardManager
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.provider.Settings
@@ -105,8 +107,40 @@ class MainActivity : FlutterActivity() {
 
     // ─── Handle wake word intent from the foreground service ───────────
 
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        super.onCreate(savedInstanceState)
+        maybeDismissKeyguard(intent)
+    }
+
+    /// Shows this activity over the lock screen and asks the system to dismiss
+    /// the keyguard when the wake-word service requested an unlock.
+    private fun maybeDismissKeyguard(intent: Intent?) {
+        if (intent?.getBooleanExtra(WakeWordForegroundService.EXTRA_DISMISS_KEYGUARD, false) != true) return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(true)
+                setTurnScreenOn(true)
+            } else {
+                @Suppress("DEPRECATION")
+                window.addFlags(
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                        WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                        WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+                )
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+                km.requestDismissKeyguard(this, null)
+            }
+            Log.d("NexaKotlin", "Requested keyguard dismissal")
+        } catch (e: Exception) {
+            Log.e("NexaKotlin", "Failed to dismiss keyguard: ${e.message}")
+        }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        maybeDismissKeyguard(intent)
         if (intent.getBooleanExtra(WakeWordForegroundService.EXTRA_WAKE_WORD_DETECTED, false)) {
             val trailingText = intent.getStringExtra(WakeWordForegroundService.EXTRA_TRAILING_TEXT) ?: ""
             Log.d("NexaKotlin", "Wake word intent received. Trailing: \"$trailingText\"")

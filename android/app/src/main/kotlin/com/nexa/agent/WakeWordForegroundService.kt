@@ -1,5 +1,6 @@
 package com.nexa.agent
 
+import android.accessibilityservice.GestureDescription
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -38,6 +39,7 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         const val ACTION_STOP = "com.nexa.agent.STOP_WAKE_WORD"
         const val EXTRA_WAKE_WORD_DETECTED = "wake_word_detected"
         const val EXTRA_TRAILING_TEXT = "trailing_text"
+        const val EXTRA_DISMISS_KEYGUARD = "dismiss_keyguard"
 
         // Known wake phrase variants (matching Dart-side patterns)
         val WAKE_PHRASES = listOf(
@@ -130,10 +132,10 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         }
     }
 
-    /// Wakes and unlocks the screen. This uses the accessibility service
-    /// to wake the screen (power keyevent) and then dismiss the keyguard
-    /// (GLOBAL_ACTION_DISMISS_KEYGUARD on API 28+).
-    /// Requires the accessibility service to be enabled.
+    /// Wakes and unlocks the screen: presses power to wake, optionally swipes
+    /// up via the accessibility service (for swipe-only keyguards), then
+    /// launches MainActivity, which requests a proper keyguard dismissal via
+    /// KeyguardManager.requestDismissKeyguard().
     private fun unlockScreen() {
         Log.d(TAG, "Unlocking screen")
         try {
@@ -141,38 +143,31 @@ class WakeWordForegroundService : Service(), RecognitionListener {
             Runtime.getRuntime().exec(arrayOf("/system/bin/sh", "-c", "input keyevent 26"))
             Thread.sleep(500) // Wait for screen to wake
 
-            // Then: dismiss the keyguard using accessibility service
+            // Then: try a swipe-up gesture to dismiss a swipe-only keyguard.
+            // There is no public accessibility global action for dismissing the
+            // keyguard, so secure keyguards are handled by MainActivity through
+            // KeyguardManager.requestDismissKeyguard().
             val service = AgentAccessibilityService.instance
             if (service != null) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    // GLOBAL_ACTION_DISMISS_KEYGUARD requires the service to be
-                    // declared with FLAG_REQUEST_DISMISS_KEYGUARD in its metadata.
-                    service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_DISMISS_KEYGUARD)
-                    Log.d(TAG, "Dismissed keyguard via accessibility service")
-                } else {
-                    // Pre-API 28: swipe up gesture to unlock
-                    val path = android.graphics.Path()
-                    path.moveTo(540f, 1800f)
-                    path.lineTo(540f, 300f)
-                    val gesture = android.accessibilityservice.AccessibilityService.GestureDescription(
-                        path, 0, 500
-                    )
-                    service.dispatchGesture(gesture, null, null)
-                    Log.d(TAG, "Attempted unlock via swipe gesture")
-                }
-
-                // Also launch Nexa app to foreground
-                val launchIntent = Intent(this, MainActivity::class.java)
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                startActivity(launchIntent)
+                val metrics = resources.displayMetrics
+                val x = metrics.widthPixels / 2f
+                val path = android.graphics.Path()
+                path.moveTo(x, metrics.heightPixels * 0.9f)
+                path.lineTo(x, metrics.heightPixels * 0.15f)
+                val gesture = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0, 500))
+                    .build()
+                service.dispatchGesture(gesture, null, null)
+                Log.d(TAG, "Attempted unlock via swipe gesture")
             } else {
-                // No accessibility service — wake the screen at least
-                // (can't dismiss keyguard without accessibility)
-                Log.w(TAG, "Accessibility service not running — can only wake screen, not dismiss keyguard")
-                val launchIntent = Intent(this, MainActivity::class.java)
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                startActivity(launchIntent)
+                Log.w(TAG, "Accessibility service not running — cannot swipe to unlock")
             }
+
+            // Launch Nexa, asking it to show over the keyguard and dismiss it.
+            val launchIntent = Intent(this, MainActivity::class.java)
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            launchIntent.putExtra(EXTRA_DISMISS_KEYGUARD, true)
+            startActivity(launchIntent)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to unlock screen: ${e.message}")
         }
@@ -191,7 +186,7 @@ class WakeWordForegroundService : Service(), RecognitionListener {
 
             val listenIntent = Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             listenIntent.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                android.speech.RecognizerIntent.LANG_MODEL_FREE_FORM)
+                android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             listenIntent.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "en-US")
             listenIntent.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-US")
             listenIntent.putExtra(android.speech.RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
