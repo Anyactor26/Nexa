@@ -28,6 +28,7 @@ class MainActivity : FlutterActivity() {
     private val WAKE_WORD_CHANNEL = "com.nexa.agent/wake_word"
     private var eventSink: EventChannel.EventSink? = null
     private var overlayView: View? = null
+    private var pendingWakeWordText: String? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -72,26 +73,48 @@ class MainActivity : FlutterActivity() {
         )
 
         registerAccessibilityChannel(flutterEngine, this)
+
+        // Flush a wake word captured during cold start, once Dart can hear it.
+        pendingWakeWordText?.let { trailing ->
+            pendingWakeWordText = null
+            val messenger = flutterEngine.dartExecutor.binaryMessenger
+            Handler(Looper.getMainLooper()).post {
+                MethodChannel(messenger, WAKE_WORD_CHANNEL).invokeMethod(
+                    "onWakeWordDetected",
+                    mapOf("trailingText" to trailing, "wakeWordDetected" to true)
+                )
+            }
+        }
     }
 
     // ─── Wake Word Foreground Service control ──────────────────────────
 
     private fun startWakeWordForegroundService() {
-        val intent = Intent(this, WakeWordForegroundService::class.java)
-        intent.action = WakeWordForegroundService.ACTION_START
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
+        // Android 12+ throws ForegroundServiceStartNotAllowedException if the
+        // app is not in a valid state to start a FGS; don't take the app down.
+        try {
+            val intent = Intent(this, WakeWordForegroundService::class.java)
+            intent.action = WakeWordForegroundService.ACTION_START
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            Log.d("NexaKotlin", "Wake word foreground service started")
+        } catch (e: Exception) {
+            Log.e("NexaKotlin", "Failed to start wake word service: ${e.message}")
         }
-        Log.d("NexaKotlin", "Wake word foreground service started")
     }
 
     private fun stopWakeWordForegroundService() {
-        val intent = Intent(this, WakeWordForegroundService::class.java)
-        intent.action = WakeWordForegroundService.ACTION_STOP
-        startService(intent)
-        Log.d("NexaKotlin", "Wake word foreground service stop requested")
+        try {
+            val intent = Intent(this, WakeWordForegroundService::class.java)
+            intent.action = WakeWordForegroundService.ACTION_STOP
+            startService(intent)
+            Log.d("NexaKotlin", "Wake word foreground service stop requested")
+        } catch (e: Exception) {
+            Log.e("NexaKotlin", "Failed to stop wake word service: ${e.message}")
+        }
     }
 
     private fun isWakeWordServiceRunning(): Boolean {
@@ -110,6 +133,12 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
         maybeDismissKeyguard(intent)
+        // Cold start: onNewIntent does NOT fire when the service launches a
+        // killed app, so the wake-word extras arrive here. The Dart side isn't
+        // listening yet, so buffer them until the engine is configured.
+        if (intent?.getBooleanExtra(WakeWordForegroundService.EXTRA_WAKE_WORD_DETECTED, false) == true) {
+            pendingWakeWordText = intent.getStringExtra(WakeWordForegroundService.EXTRA_TRAILING_TEXT) ?: ""
+        }
     }
 
     /// Shows this activity over the lock screen and asks the system to dismiss
@@ -140,6 +169,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         maybeDismissKeyguard(intent)
         if (intent.getBooleanExtra(WakeWordForegroundService.EXTRA_WAKE_WORD_DETECTED, false)) {
             val trailingText = intent.getStringExtra(WakeWordForegroundService.EXTRA_TRAILING_TEXT) ?: ""

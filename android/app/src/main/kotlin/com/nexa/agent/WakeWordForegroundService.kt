@@ -79,6 +79,17 @@ class WakeWordForegroundService : Service(), RecognitionListener {
             return START_NOT_STICKY
         }
 
+        // Always promote to the foreground before doing anything else. If we
+        // were launched with startForegroundService() and fail to call
+        // startForeground() within ~5s, Android kills the process with a
+        // ForegroundServiceDidNotStartInTimeException.
+        if (!enterForeground()) {
+            // Microphone FGS can be refused (e.g. permission revoked, or a
+            // background start on Android 12+). Nothing else is safe to do.
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         // Handle lock/unlock commands from the service layer
         if (intent?.action == ACTION_LOCK_SCREEN) {
             lockScreen()
@@ -89,18 +100,31 @@ class WakeWordForegroundService : Service(), RecognitionListener {
             return START_STICKY
         }
 
-        // Start as foreground service with persistent notification
-        val notification = buildNotification("Listening for \"Hey Nexa\"…")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
-
         // Start listening
         startListening()
         return START_STICKY  // Restart if killed by the system
+    }
+
+    /// Promotes the service to the foreground with the persistent notification.
+    /// Returns false when the platform refuses the start (missing RECORD_AUDIO,
+    /// background-start restrictions on Android 12+, etc.) so callers can bail
+    /// out instead of crashing.
+    private fun enterForeground(): Boolean {
+        return try {
+            val notification = buildNotification("Listening for \"Hey Nexa\"…")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID, notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not enter foreground: ${e.message}")
+            false
+        }
     }
 
     override fun onDestroy() {
@@ -141,9 +165,17 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         try {
             // First: wake the screen by pressing power
             Runtime.getRuntime().exec(arrayOf("/system/bin/sh", "-c", "input keyevent 26"))
-            Thread.sleep(500) // Wait for screen to wake
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to wake screen: ${e.message}")
+        }
+        // onStartCommand runs on the main thread — never Thread.sleep() here or
+        // the service ANRs. Continue after the screen has had time to wake.
+        handler.postDelayed({ finishUnlock() }, 500)
+    }
 
-            // Then: try a swipe-up gesture to dismiss a swipe-only keyguard.
+    private fun finishUnlock() {
+        try {
+            // Try a swipe-up gesture to dismiss a swipe-only keyguard.
             // There is no public accessibility global action for dismissing the
             // keyguard, so secure keyguards are handled by MainActivity through
             // KeyguardManager.requestDismissKeyguard().
@@ -316,14 +348,20 @@ class WakeWordForegroundService : Service(), RecognitionListener {
             .replace(Regex("\\s+"), " ")
             .trim()
 
+        // NOTE: offsets from `normalized` must not be applied to `text` — the
+        // lowercase/punctuation/whitespace collapsing shifts them. Slice the
+        // normalized string, which is also what the Dart side consumes.
+        var best = -1
+        var bestEnd = 0
         for (phrase in WAKE_PHRASES) {
             val idx = normalized.indexOf(phrase)
-            if (idx >= 0) {
-                val originalAfterWake = text.substring(
-                    minOf(idx + phrase.length, text.length)
-                ).trim()
-                return originalAfterWake
+            if (idx >= 0 && (best == -1 || idx < best)) {
+                best = idx
+                bestEnd = idx + phrase.length
             }
+        }
+        if (best >= 0) {
+            return normalized.substring(minOf(bestEnd, normalized.length)).trim()
         }
         return ""
     }

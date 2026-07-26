@@ -298,6 +298,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 val args = Bundle()
                 args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
                 val success = editNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                editNode.recycle()
                 root.recycle()
                 return success
             }
@@ -371,7 +372,9 @@ class AgentAccessibilityService : AccessibilityService() {
         hint: String?
     ): AccessibilityNodeInfo? {
         if (node.isEditable) {
-            if (hint == null) return node
+            // Return an independent handle: the caller recycles the root while
+            // still using this node, which would otherwise be a use-after-free.
+            if (hint == null) return AccessibilityNodeInfo.obtain(node)
             val text = node.text?.toString() ?: ""
             val desc = node.contentDescription?.toString() ?: ""
             val hintText = node.hintText?.toString() ?: ""
@@ -379,10 +382,10 @@ class AgentAccessibilityService : AccessibilityService() {
                 desc.contains(hint, ignoreCase = true) ||
                 hintText.contains(hint, ignoreCase = true)
             ) {
-                return node
+                return AccessibilityNodeInfo.obtain(node)
             }
             // If no hint match but this is the first editable, return it
-            if (hint.isNullOrEmpty()) return node
+            if (hint.isEmpty()) return AccessibilityNodeInfo.obtain(node)
         }
 
         for (i in 0 until node.childCount) {
@@ -410,6 +413,7 @@ class AgentAccessibilityService : AccessibilityService() {
                     else -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
                 }
                 val success = scrollNode.performAction(action)
+                scrollNode.recycle()
                 root.recycle()
                 return success
             }
@@ -423,13 +427,13 @@ class AgentAccessibilityService : AccessibilityService() {
         targetText: String?
     ): AccessibilityNodeInfo? {
         if (node.isScrollable) {
-            if (targetText == null) return node
+            if (targetText == null) return AccessibilityNodeInfo.obtain(node)
             val text = node.text?.toString() ?: ""
             val desc = node.contentDescription?.toString() ?: ""
             if (text.contains(targetText, ignoreCase = true) ||
                 desc.contains(targetText, ignoreCase = true)
             ) {
-                return node
+                return AccessibilityNodeInfo.obtain(node)
             }
         }
         for (i in 0 until node.childCount) {

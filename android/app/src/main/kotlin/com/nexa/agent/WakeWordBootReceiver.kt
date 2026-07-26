@@ -27,13 +27,22 @@ class WakeWordBootReceiver : BroadcastReceiver() {
 
         if (!isEnabled) return
 
-        // Start the foreground wake-word service
-        val serviceIntent = Intent(context, WakeWordForegroundService::class.java)
-        serviceIntent.action = WakeWordForegroundService.ACTION_START
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(serviceIntent)
-        } else {
-            context.startService(serviceIntent)
+        // Start the foreground wake-word service.
+        // On Android 12+ a service started from BOOT_COMPLETED is denied
+        // while-in-use permissions, so a microphone-typed FGS can throw
+        // (ForegroundServiceStartNotAllowedException / SecurityException).
+        // A crash here would put the device in a boot-loop of ANRs, so this
+        // must never be allowed to escape onReceive().
+        try {
+            val serviceIntent = Intent(context, WakeWordForegroundService::class.java)
+            serviceIntent.action = WakeWordForegroundService.ACTION_START
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent)
+            } else {
+                context.startService(serviceIntent)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not start wake-word service on boot: ${e.message}")
         }
     }
 }
