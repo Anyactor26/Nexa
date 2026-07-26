@@ -17,12 +17,9 @@
         android:name="android.permission.SYSTEM_ALERT_WINDOW"
         tools:node="remove" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!-- Allows dispatching shell commands to Termux as a Shizuku fallback -->
-    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
 
     <!-- For speech recognition -->
     <queries>
-        <package android:name="com.termux" />
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>

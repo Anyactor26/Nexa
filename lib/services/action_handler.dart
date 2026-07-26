@@ -100,6 +100,12 @@ class ActionHandler {
           );
           break;
 
+        case 'run_root_command':
+          result = await _shizuku.runRootCommand(
+            action.params['command'] as String? ?? '',
+          );
+          break;
+
         case 'send_email':
           result = await _communication.sendEmail(
             to: action.params['to'] as String? ?? '',

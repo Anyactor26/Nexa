@@ -48,6 +48,7 @@ class _SettingsScreenState extends State<SettingsScreen>
   bool _obscureKey = true;
   bool _telegramEnabled = false;
   bool _discordEnabled = false;
+  bool _startingDiscord = false;
   bool _wakeWordEnabled = false;
   double _maxSteps = 15;
   bool _disableMaxSteps = false;
@@ -219,6 +220,72 @@ class _SettingsScreenState extends State<SettingsScreen>
       useSystemPrompt: _useSystemPrompt,
     );
     widget.aiService.saveSpeedMultiplier(_speedMultiplier);
+  }
+
+  Future<void> _startDiscordBot() async {
+    final token = _discordTokenController.text.trim();
+    final channelId = _discordChannelIdController.text.trim();
+    if (token.isEmpty || channelId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Enter a Discord bot token and channel ID first.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _startingDiscord = true;
+      _discordEnabled = true;
+    });
+
+    await widget.discordService.saveSettings(
+      botToken: token,
+      channelId: channelId,
+      authPassword: _discordPasswordController.text,
+      isEnabled: true,
+      autoStart: false,
+    );
+    final started = await widget.discordService.startBot();
+
+    if (!mounted) return;
+    setState(() => _startingDiscord = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          started
+              ? 'Discord bot started. Try !nexa_status in the channel.'
+              : (widget.discordService.lastError ?? 'Discord bot could not start.'),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _stopDiscordBot() async {
+    setState(() {
+      _startingDiscord = true;
+      _discordEnabled = false;
+    });
+    await widget.discordService.stopBot();
+    if (!mounted) return;
+    setState(() => _startingDiscord = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Discord bot stopped.')),
+    );
+  }
+
+  String _discordStatusText() {
+    if (_startingDiscord) return 'Updating Discord bot...';
+    if (widget.discordService.isPolling) {
+      final lastPoll = widget.discordService.lastPollAt;
+      return lastPoll == null
+          ? 'Bot is starting and waiting for Discord...'
+          : 'Bot is running. Last check: ${lastPoll.toLocal().toString().split('.').first}';
+    }
+    if (!_discordEnabled) return 'Disabled.';
+    final error = widget.discordService.lastError;
+    if (error != null && error.isNotEmpty) return 'Not running — $error';
+    return 'Enabled, but not currently polling. Tap Start Bot.';
   }
 
   Future<void> _fetchModels() async {
@@ -884,6 +951,26 @@ class _SettingsScreenState extends State<SettingsScreen>
                 ),
                 value: _wakeWordEnabled,
                 onChanged: (bool value) async {
+                  if (value) {
+                    var micStatus = _permissions['Microphone'];
+                    micStatus ??= await Permission.microphone.status;
+                    if (!micStatus.isGranted) {
+                      micStatus = await Permission.microphone.request();
+                      _permissions['Microphone'] = micStatus;
+                    }
+                    if (!micStatus.isGranted) {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'Microphone permission is required for "Hey Nexa".',
+                            ),
+                          ),
+                        );
+                      }
+                      return;
+                    }
+                  }
                   await widget.wakeWordService.setEnabled(value);
                   setState(() => _wakeWordEnabled = value);
                 },
@@ -1019,20 +1106,58 @@ class _SettingsScreenState extends State<SettingsScreen>
               const SizedBox(height: 4),
               SwitchListTile(
                 title: const Text('Enable Discord Bot'),
-                subtitle: const Text(
-                  'Polls the channel every 3 seconds for new commands',
-                ),
+                subtitle: Text(_discordStatusText()),
                 value: _discordEnabled,
-                onChanged: (val) {
-                  setState(() => _discordEnabled = val);
-                  _autoSave();
+                onChanged: (val) async {
+                  if (val) {
+                    await _startDiscordBot();
+                  } else {
+                    await _stopDiscordBot();
+                  }
                 },
                 contentPadding: EdgeInsets.zero,
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _startingDiscord ? null : _startDiscordBot,
+                      icon: _startingDiscord
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.play_arrow_rounded),
+                      label: const Text('Start Bot'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _startingDiscord || !widget.discordService.isPolling
+                          ? null
+                          : _stopDiscordBot,
+                      icon: const Icon(Icons.stop_rounded),
+                      label: const Text('Stop'),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
 
-          // 6. Accessibility Screen Control Card
+          // 6. Shell / PRoot Card
+          _buildSettingsCard(
+            icon: Icons.terminal_rounded,
+            title: 'Shell & PRoot',
+            subtitle: 'Runs commands without Shizuku or Termux; PRoot/root stays optional',
+            isDark: isDark,
+            children: [_buildShizukuCard()],
+          ),
+
+          // 7. Accessibility Screen Control Card
           _buildSettingsCard(
             icon: Icons.visibility_outlined,
             title: 'Screen Control (Accessibility)',
@@ -1227,24 +1352,18 @@ class _SettingsScreenState extends State<SettingsScreen>
           children: [
             Row(
               children: [
-                Icon(
-                  widget.shizukuService.isAvailable
-                      ? Icons.link
-                      : Icons.link_off,
-                  color: widget.shizukuService.isAvailable
-                      ? Colors.green
-                      : Colors.grey,
+                const Icon(
+                  Icons.terminal_rounded,
+                  color: Colors.green,
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  widget.shizukuService.isAvailable
-                      ? 'Shizuku is running'
-                      : 'Shizuku not detected',
-                  style: TextStyle(
+                  widget.shizukuService.hasPermission
+                      ? 'Native shell ready + optional Shizuku permission granted'
+                      : 'Native Android shell ready',
+                  style: const TextStyle(
                     fontWeight: FontWeight.w600,
-                    color: widget.shizukuService.isAvailable
-                        ? Colors.green
-                        : Colors.grey,
+                    color: Colors.green,
                   ),
                 ),
               ],
@@ -1252,9 +1371,8 @@ class _SettingsScreenState extends State<SettingsScreen>
             const SizedBox(height: 12),
             if (!widget.shizukuService.isAvailable) ...[
               const Text(
-                '1. Install Shizuku from Play Store\n'
-                '2. Open Shizuku and start it via Wireless Debugging\n'
-                '3. Come back here and tap "Check Again"',
+                'Basic commands run with Android\'s built-in shell — no Shizuku, Termux, Wi-Fi, wireless debugging, or mobile-data workaround required.\n\n'
+                'Android may still block privileged commands. For those, use Accessibility automation, root/PRoot, or optionally grant Shizuku if you already have it running.',
                 style: TextStyle(fontSize: 13),
               ),
               const SizedBox(height: 12),
@@ -1266,6 +1384,11 @@ class _SettingsScreenState extends State<SettingsScreen>
                 child: const Text('Check Again'),
               ),
             ] else if (!widget.shizukuService.hasPermission) ...[
+              const Text(
+                'Nexa will still run normal commands with its native shell. Grant Shizuku only if you want optional privileged shell fallback.',
+                style: TextStyle(fontSize: 13),
+              ),
+              const SizedBox(height: 12),
               OutlinedButton(
                 onPressed: () async {
                   await widget.shizukuService.requestPermission();
@@ -1279,7 +1402,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                   const Icon(Icons.check_circle, color: Colors.green, size: 16),
                   const SizedBox(width: 4),
                   Text(
-                    'Permission granted — ADB commands available',
+                    'Permission granted — privileged shell commands available',
                     style: TextStyle(color: Colors.green[700], fontSize: 13),
                   ),
                 ],

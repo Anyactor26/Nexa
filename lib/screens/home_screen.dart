@@ -73,7 +73,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     await _telegramService.init();
     await _discordService.init();
     await _wakeWordService.init(onWakeWord: _onWakeWordDetected);
-    await _actionHandler.shizuku.checkAvailability();
+    // Shizuku is optional. Check in the background so Nexa still starts fast
+    // on mobile data or devices where Wireless Debugging/Shizuku is absent.
+    unawaited(_actionHandler.shizuku.checkAvailability());
 
     if (mounted) {
       setState(() {});

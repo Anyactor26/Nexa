@@ -13,6 +13,10 @@ import android.view.WindowManager
 import android.view.View
 import android.widget.Button
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.nexa.agent/accessibility"
@@ -45,6 +49,86 @@ class MainActivity : FlutterActivity() {
     }
 
     companion object {
+        private const val MAX_SHELL_OUTPUT_CHARS = 20000
+
+        private fun runShellCommand(command: String, timeoutSeconds: Int, result: MethodChannel.Result) {
+            val safeCommand = command.trim()
+            if (safeCommand.isEmpty()) {
+                result.success(
+                    mapOf(
+                        "stdout" to "",
+                        "stderr" to "No command provided.",
+                        "exitCode" to 2,
+                        "timedOut" to false
+                    )
+                )
+                return
+            }
+
+            val mainHandler = Handler(Looper.getMainLooper())
+            thread(name = "NexaShellRunner", isDaemon = true) {
+                var process: Process? = null
+                try {
+                    val shellProcess = ProcessBuilder("/system/bin/sh", "-c", safeCommand).start()
+                    process = shellProcess
+                    val stdout = StringBuilder()
+                    val stderr = StringBuilder()
+                    val stdoutThread = streamReaderThread(shellProcess.inputStream, stdout)
+                    val stderrThread = streamReaderThread(shellProcess.errorStream, stderr)
+                    val finished = shellProcess.waitFor(timeoutSeconds.coerceAtLeast(1).toLong(), TimeUnit.SECONDS)
+
+                    if (!finished) {
+                        shellProcess.destroyForcibly()
+                    }
+
+                    stdoutThread.join(500)
+                    stderrThread.join(500)
+
+                    val response = mapOf(
+                        "stdout" to stdout.toString(),
+                        "stderr" to if (finished) stderr.toString() else stderr.toString() + "\nTimed out after ${timeoutSeconds.coerceAtLeast(1)}s.",
+                        "exitCode" to if (finished) shellProcess.exitValue() else 124,
+                        "timedOut" to !finished
+                    )
+                    mainHandler.post { result.success(response) }
+                } catch (e: Exception) {
+                    try {
+                        process?.destroyForcibly()
+                    } catch (_: Exception) {}
+                    mainHandler.post {
+                        result.success(
+                            mapOf(
+                                "stdout" to "",
+                                "stderr" to (e.message ?: e.toString()),
+                                "exitCode" to 1,
+                                "timedOut" to false
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        private fun streamReaderThread(stream: java.io.InputStream, target: StringBuilder): Thread {
+            return thread(name = "NexaShellStreamReader", isDaemon = true) {
+                try {
+                    val buffer = ByteArray(4096)
+                    while (true) {
+                        val count = stream.read(buffer)
+                        if (count <= 0) break
+                        if (target.length < MAX_SHELL_OUTPUT_CHARS) {
+                            val remaining = MAX_SHELL_OUTPUT_CHARS - target.length
+                            val text = String(buffer, 0, minOf(count, remaining))
+                            target.append(text)
+                            if (count > remaining) {
+                                target.append("\n…output truncated…")
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+
         fun registerAccessibilityChannel(flutterEngine: FlutterEngine, context: android.content.Context) {
             MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.nexa.agent/accessibility")
                 .setMethodCallHandler { call, result ->
@@ -174,6 +258,12 @@ class MainActivity : FlutterActivity() {
                             val message = call.argument<String>("message") ?: ""
                             android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_SHORT).show()
                             result.success(true)
+                        }
+
+                        "runShellCommand" -> {
+                            val command = call.argument<String>("command") ?: ""
+                            val timeoutSeconds = call.argument<Int>("timeoutSeconds") ?: 30
+                            runShellCommand(command, timeoutSeconds, result)
                         }
 
                         "swipe" -> {

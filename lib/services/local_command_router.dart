@@ -29,6 +29,7 @@ class LocalCommandRouter {
     _matchVolume,
     _matchBrightness,
     _matchOpenApp,
+    _matchRunRootCommand,
     _matchRunCommand,
   ];
 
@@ -201,7 +202,25 @@ class LocalCommandRouter {
     );
   }
 
-  // ─── Run command (ADB / shell via Shizuku) ──────────────────────────
+  // ─── Run command (ADB / shell via Shizuku or local Android shell) ───
+
+  static final RegExp _runRootCommandRegex = RegExp(
+    r'^(?:please\s+)?(?:run|execute)\s+(?:the\s+)?(?:root|proot|p-root)\s+(?:command|shell command)\s*[:]?\s*(.+)$',
+    caseSensitive: false,
+  );
+
+  static AgentAction? _matchRunRootCommand(String text) {
+    final match = _runRootCommandRegex.firstMatch(text);
+    if (match == null) return null;
+    final command = match.group(1)?.trim() ?? '';
+    if (command.isEmpty) return null;
+
+    return AgentAction(
+      action: 'run_root_command',
+      params: {'command': command},
+      response: 'Running root/PRoot command: $command',
+    );
+  }
 
   static final RegExp _runCommandRegex = RegExp(
     r'^(?:please\s+)?(?:run|execute)\s+(?:the\s+)?(?:command|shell command|adb command)\s*[:]?\s*(.+)$',
