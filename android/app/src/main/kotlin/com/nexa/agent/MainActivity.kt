@@ -21,11 +21,33 @@ import kotlin.concurrent.thread
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.nexa.agent/accessibility"
     private val EVENT_CHANNEL = "com.nexa.agent/accessibility_events"
+    private val WAKE_WORD_CHANNEL = "com.nexa.agent/wake_word"
     private var eventSink: EventChannel.EventSink? = null
     private var overlayView: View? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        // ─── Wake Word Service MethodChannel ───────────────────────────
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WAKE_WORD_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "startWakeWordService" -> {
+                        startWakeWordForegroundService()
+                        result.success(true)
+                    }
+                    "stopWakeWordService" -> {
+                        stopWakeWordForegroundService()
+                        result.success(true)
+                    }
+                    "isWakeWordServiceRunning" -> {
+                        // Check if the service is running by trying to ping it
+                        val isRunning = isWakeWordServiceRunning()
+                        result.success(isRunning)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
 
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, EVENT_CHANNEL).setStreamHandler(
             object : EventChannel.StreamHandler {
@@ -46,6 +68,59 @@ class MainActivity : FlutterActivity() {
         )
 
         registerAccessibilityChannel(flutterEngine, this)
+    }
+
+    // ─── Wake Word Foreground Service control ──────────────────────────
+
+    private fun startWakeWordForegroundService() {
+        val intent = Intent(this, WakeWordForegroundService::class.java)
+        intent.action = WakeWordForegroundService.ACTION_START
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+        Log.d("NexaKotlin", "Wake word foreground service started")
+    }
+
+    private fun stopWakeWordForegroundService() {
+        val intent = Intent(this, WakeWordForegroundService::class.java)
+        intent.action = WakeWordForegroundService.ACTION_STOP
+        startService(intent)
+        Log.d("NexaKotlin", "Wake word foreground service stop requested")
+    }
+
+    private fun isWakeWordServiceRunning(): Boolean {
+        // Simple check: try to determine if the service is active
+        val manager = getSystemService(android.app.ActivityManager::class.java)
+        for (service in manager.getRunningServices(Int.MAX_VALUE)) {
+            if (service.service.className == "com.nexa.agent.WakeWordForegroundService") {
+                return true
+            }
+        }
+        return false
+    }
+
+    // ─── Handle wake word intent from the foreground service ───────────
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.getBooleanExtra(WakeWordForegroundService.EXTRA_WAKE_WORD_DETECTED, false)) {
+            val trailingText = intent.getStringExtra(WakeWordForegroundService.EXTRA_TRAILING_TEXT) ?: ""
+            Log.d("NexaKotlin", "Wake word intent received. Trailing: \"$trailingText\"")
+
+            // Forward the wake word event to Flutter via the accessibility channel
+            // (since Flutter engine is already running when onNewIntent fires)
+            flutterEngine?.dartExecutor?.binaryMessenger?.let { messenger ->
+                MethodChannel(messenger, WAKE_WORD_CHANNEL).invokeMethod(
+                    "onWakeWordDetected",
+                    mapOf(
+                        "trailingText" to trailingText,
+                        "wakeWordDetected" to true
+                    )
+                )
+            }
+        }
     }
 
     companion object {

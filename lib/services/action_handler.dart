@@ -9,6 +9,7 @@ import 'shizuku_service.dart';
 import 'screen_automation_service.dart';
 import 'task_executor.dart';
 import 'ai_service.dart';
+import 'file_operation_service.dart';
 
 class ActionHandler {
   final AppLauncherService _appLauncher = AppLauncherService();
@@ -18,9 +19,15 @@ class ActionHandler {
   final SystemControlService _systemControl = SystemControlService();
   final ShizukuService _shizuku = ShizukuService();
   final ScreenAutomationService _screenAutomation = ScreenAutomationService();
+  late final FileOperationService _fileOps;
 
   ShizukuService get shizuku => _shizuku;
   ScreenAutomationService get screenAutomation => _screenAutomation;
+  FileOperationService get fileOps => _fileOps;
+
+  ActionHandler() {
+    _fileOps = FileOperationService(_shizuku);
+  }
 
   /// The currently running task executor, if any
   TaskExecutor? _currentExecutor;
@@ -167,6 +174,112 @@ class ActionHandler {
           );
           result = await _currentExecutor!.executeTask(goal);
           _currentExecutor = null;
+          break;
+
+        // ─── File & Coding Operations (Agent-style) ───────────────────
+
+        case 'create_file':
+          final filePath = action.params['path'] as String? ?? '';
+          final content = action.params['content'] as String? ?? '';
+          if (filePath.isEmpty) {
+            result = 'No file path provided.';
+            break;
+          }
+          final fileResult = await _fileOps.createFile(filePath, content);
+          result = fileResult.success
+              ? fileResult.details
+              : 'Failed: ${fileResult.details}';
+          break;
+
+        case 'create_directory':
+          final dirPath = action.params['path'] as String? ?? '';
+          if (dirPath.isEmpty) {
+            result = 'No directory path provided.';
+            break;
+          }
+          final dirResult = await _fileOps.createDirectory(dirPath);
+          result = dirResult.success
+              ? dirResult.details
+              : 'Failed: ${dirResult.details}';
+          break;
+
+        case 'read_file':
+          final filePath = action.params['path'] as String? ?? '';
+          if (filePath.isEmpty) {
+            result = 'No file path provided.';
+            break;
+          }
+          final readResult = await _fileOps.readFile(filePath);
+          result = readResult.success
+              ? readResult.details
+              : 'Failed: ${readResult.details}';
+          break;
+
+        case 'edit_file':
+          final filePath = action.params['path'] as String? ?? '';
+          final newContent = action.params['content'] as String? ?? '';
+          if (filePath.isEmpty) {
+            result = 'No file path provided.';
+            break;
+          }
+          final editResult = await _fileOps.editFile(filePath, newContent);
+          result = editResult.success
+              ? editResult.details
+              : 'Failed: ${editResult.details}';
+          break;
+
+        case 'append_file':
+          final filePath = action.params['path'] as String? ?? '';
+          final appendContent = action.params['content'] as String? ?? '';
+          if (filePath.isEmpty) {
+            result = 'No file path provided.';
+            break;
+          }
+          final appendResult = await _fileOps.appendToFile(filePath, appendContent);
+          result = appendResult.success
+              ? appendResult.details
+              : 'Failed: ${appendResult.details}';
+          break;
+
+        case 'list_directory':
+          final dirPath = action.params['path'] as String? ?? '/sdcard';
+          final listResult = await _fileOps.listDirectory(dirPath);
+          result = listResult.success
+              ? listResult.details
+              : 'Failed: ${listResult.details}';
+          break;
+
+        case 'delete_file':
+          final filePath = action.params['path'] as String? ?? '';
+          if (filePath.isEmpty) {
+            result = 'No file path provided.';
+            break;
+          }
+          final delResult = await _fileOps.deleteFile(filePath);
+          result = delResult.success
+              ? delResult.details
+              : 'Failed: ${delResult.details}';
+          break;
+
+        case 'delete_directory':
+          final dirPath = action.params['path'] as String? ?? '';
+          if (dirPath.isEmpty) {
+            result = 'No directory path provided.';
+            break;
+          }
+          final delDirResult = await _fileOps.deleteDirectory(dirPath);
+          result = delDirResult.success
+              ? delDirResult.details
+              : 'Failed: ${delDirResult.details}';
+          break;
+
+        case 'search_files':
+          final directory = action.params['directory'] as String? ?? '/sdcard';
+          final pattern = action.params['pattern'] as String? ?? '*';
+          final searchResult = await _fileOps.searchFiles(directory, pattern);
+          result = searchResult.success
+              ? searchResult.details
+              : 'Failed: ${searchResult.details}';
           break;
 
         default:

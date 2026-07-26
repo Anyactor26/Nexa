@@ -18,7 +18,7 @@ import '../services/notification_service.dart';
 import 'settings_screen.dart';
 import 'task_history_screen.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
-import '../main.dart';
+import '../main.dart' show themeNotifier, onOverlayTask, consumePendingWakeWord, globalAiService, globalActionHandler, globalTelegramService, globalDiscordService, globalWakeWordService;
 import '../config/feature_flags.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -31,13 +31,13 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
-  final AiService _aiService = AiService();
-  final ActionHandler _actionHandler = ActionHandler();
+  final AiService _aiService = globalAiService;
+  final ActionHandler _actionHandler = globalActionHandler;
   final VoiceService _voiceService = VoiceService();
   final NotificationService _notificationService = NotificationService();
-  late final TelegramService _telegramService;
-  late final DiscordService _discordService;
-  final WakeWordService _wakeWordService = WakeWordService();
+  final TelegramService _telegramService = globalTelegramService;
+  final DiscordService _discordService = globalDiscordService;
+  final WakeWordService _wakeWordService = globalWakeWordService;
   final LocalCommandRouter _localCommandRouter = LocalCommandRouter();
 
   final List<ChatMessage> _messages = [];
@@ -58,23 +58,41 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _telegramService = TelegramService(_actionHandler, _aiService);
-    _discordService = DiscordService(_actionHandler, _aiService);
-    _initServices();
     _startOverlayHistorySync();
     // Register as the handler for overlay bubble tasks
     onOverlayTask = (task) => _sendMessage(task);
+
+    // Pick up any wake-word command that was received before HomeScreen
+    // mounted (e.g. when the native fg service wakes the app from closed state)
+    final pendingWakeWord = consumePendingWakeWord();
+    if (pendingWakeWord != null && pendingWakeWord.trim().isNotEmpty) {
+      // Delay slightly so the UI is ready before sending the message
+      Future.delayed(const Duration(milliseconds: 500), () {
+        _sendMessage(pendingWakeWord.trim());
+      });
+    }
+
+    // Register the HomeScreen-specific wake word callback.
+    // The global wake word handler (in main.dart) stores trailing text for
+    // later, but this screen-level handler can also start voice input when
+    // there's no trailing text (i.e. the user just said "Hey Nexa" alone).
+    _wakeWordService.onWakeWord = (trailingText) {
+      if (!mounted) return;
+      if (trailingText.trim().isNotEmpty) {
+        _sendMessage(trailingText.trim());
+      } else {
+        _toggleVoice();
+      }
+    };
+
+    // Initialize services that still need per-screen setup
+    _initPerScreenServices();
   }
 
-  Future<void> _initServices() async {
-    await _aiService.init();
+  Future<void> _initPerScreenServices() async {
     await _notificationService.requestPermission();
     await _voiceService.init();
-    await _telegramService.init();
-    await _discordService.init();
-    await _wakeWordService.init(onWakeWord: _onWakeWordDetected);
-    // Shizuku is optional. Check in the background so Nexa still starts fast
-    // on mobile data or devices where Wireless Debugging/Shizuku is absent.
+    // Shizuku availability check is optional — already done in main()
     unawaited(_actionHandler.shizuku.checkAvailability());
 
     if (mounted) {
@@ -465,9 +483,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _textController.dispose();
     _scrollController.dispose();
     _voiceService.dispose();
-    _telegramService.dispose();
-    _discordService.dispose();
-    _wakeWordService.dispose();
+    // IMPORTANT: Do NOT dispose global services (Discord, Telegram, WakeWord).
+    // These are singletons that persist across the entire app lifecycle.
+    // Disposing them would stop Discord/Telegram polling and the wake-word
+    // foreground service, breaking background operation.
     super.dispose();
   }
 
@@ -1272,7 +1291,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             'Open YouTube and search for cats',
             'Call Mom',
             'Set volume to 80%',
-            'What\'s on my screen?',
+            'Create a Python script that prints hello',
           ];
 
     return SingleChildScrollView(

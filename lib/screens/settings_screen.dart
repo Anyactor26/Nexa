@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'dart:math' as math;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../main.dart';
+import '../main.dart' show themeNotifier, globalActionHandler, globalAiService, globalTelegramService, globalDiscordService, globalWakeWordService;
 import '../services/ai_service.dart';
 import '../services/shizuku_service.dart';
 import '../services/screen_automation_service.dart';

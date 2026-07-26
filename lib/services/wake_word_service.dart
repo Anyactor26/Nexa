@@ -1,19 +1,34 @@
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:ui';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:speech_to_text/speech_recognition_result.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/services.dart';
 
-/// Continuously (best-effort) listens for the wake phrase "Hey Nexa" using
-/// on-device speech recognition, and fires [onWakeWord] whenever it hears it.
+/// Continuously listens for the wake phrase "Hey Nexa".
 ///
-/// Android's [speech_to_text] plugin doesn't support a true always-on hotword
-/// engine, so this works by repeatedly starting short listening sessions and
-/// restarting them as soon as they end — as close to "always listening" as
-/// we can get without a dedicated native wake-word engine (e.g. Porcupine).
+/// **Architecture:**
+///   • When the app is **foregrounded**, uses the Dart-level
+///     `speech_to_text` plugin for fast, accurate wake-word detection.
+///   • When the app is **backgrounded or closed**, delegates to the native
+///     Android `WakeWordForegroundService`, which uses Android's
+///     `SpeechRecognizer` in a foreground service that survives process
+///     kills and reboots.
+///
+/// The two layers are coordinated so they never compete for the mic:
+///   – When the app is foregrounded, the Dart listener is active and the
+///     native service is optionally kept running but pauses its own mic.
+///   – When the app goes to background, the Dart listener is paused and
+///     the native service takes over.
+///   – The native service can also wake the app up when it's completely
+///     closed by launching the MainActivity with intent extras.
 class WakeWordService {
   static const String prefsKey = 'wake_word_enabled';
   static const String _canonicalWakePhrase = 'hey nexa';
+
+  // Method channel for communicating with the native foreground service
+  static const MethodChannel _nativeChannel = MethodChannel('com.nexa.agent/wake_word');
 
   final stt.SpeechToText _speech = stt.SpeechToText();
 
@@ -22,15 +37,16 @@ class WakeWordService {
   bool _isRunning = false;
   bool _isPaused = false;
   bool _handoffInProgress = false;
+  bool _nativeServiceRunning = false;
   Timer? _restartTimer;
   DateTime? _lastWakeAt;
 
-  /// Called (with the words heard *after* the wake phrase, if any) whenever
-  /// "Hey Nexa" is detected.
+  /// Called whenever "Hey Nexa" is detected (from either Dart or native layer).
   void Function(String trailingText)? onWakeWord;
 
   bool get isEnabled => _isEnabled;
   bool get isListening => _isRunning;
+  bool get isNativeServiceRunning => _nativeServiceRunning;
 
   Future<void> init({void Function(String trailingText)? onWakeWord}) async {
     if (onWakeWord != null) this.onWakeWord = onWakeWord;
@@ -38,12 +54,69 @@ class WakeWordService {
     final prefs = await SharedPreferences.getInstance();
     _isEnabled = prefs.getBool(prefsKey) ?? false;
 
+    // Listen for wake word events coming FROM the native foreground service
+    // (e.g. when the app was closed and the native service wakes it up)
+    _nativeChannel.setMethodCallHandler((MethodCall call) async {
+      if (call.method == 'onWakeWordDetected') {
+        final args = call.arguments as Map?;
+        final trailingText = (args?['trailingText'] as String?) ?? '';
+        developer.log(
+          'Wake word detected from NATIVE foreground service. Trailing: "$trailingText"',
+          name: 'WakeWordService',
+        );
+        _handleWakeWord(trailingText);
+      }
+    });
+
     await _ensureInitialized();
 
     if (_isEnabled && _isInitialized) {
       _startListeningLoop();
+      // Also start the native foreground service for background detection
+      await _startNativeForegroundService();
     }
   }
+
+  /// Enable or disable wake word detection. Persists to SharedPreferences.
+  Future<void> setEnabled(bool enabled) async {
+    _isEnabled = enabled;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(prefsKey, enabled);
+
+    if (enabled) {
+      await _ensureInitialized();
+      _startListeningLoop();
+      await _startNativeForegroundService();
+    } else {
+      await _stopListeningLoop();
+      await _stopNativeForegroundService();
+    }
+  }
+
+  // ─── Native foreground service control ───────────────────────────────
+
+  Future<void> _startNativeForegroundService() async {
+    try {
+      await _nativeChannel.invokeMethod<bool>('startWakeWordService');
+      _nativeServiceRunning = true;
+      developer.log('Native wake word foreground service started', name: 'WakeWordService');
+    } catch (e) {
+      developer.log('Failed to start native wake word service: $e', name: 'WakeWordService');
+      _nativeServiceRunning = false;
+    }
+  }
+
+  Future<void> _stopNativeForegroundService() async {
+    try {
+      await _nativeChannel.invokeMethod<bool>('stopWakeWordService');
+      _nativeServiceRunning = false;
+      developer.log('Native wake word foreground service stopped', name: 'WakeWordService');
+    } catch (e) {
+      developer.log('Failed to stop native wake word service: $e', name: 'WakeWordService');
+    }
+  }
+
+  // ─── Dart-level speech recognition (foreground) ──────────────────────
 
   Future<void> _ensureInitialized() async {
     if (_isInitialized) return;
@@ -52,7 +125,6 @@ class WakeWordService {
       onError: (error) {
         developer.log('WakeWordService error: $error', name: 'WakeWordService');
         _isRunning = false;
-        // Restart listening after an error if we're still supposed to be on.
         if (_isEnabled && !_isPaused && !_handoffInProgress) {
           _restartSoon();
         }
@@ -69,20 +141,6 @@ class WakeWordService {
         }
       },
     );
-  }
-
-  /// Enable or disable wake word detection. Persists to SharedPreferences.
-  Future<void> setEnabled(bool enabled) async {
-    _isEnabled = enabled;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(prefsKey, enabled);
-
-    if (enabled) {
-      await _ensureInitialized();
-      _startListeningLoop();
-    } else {
-      await _stopListeningLoop();
-    }
   }
 
   /// Temporarily pause wake-word listening (e.g. while the app itself is
@@ -163,29 +221,15 @@ class WakeWordService {
 
     final match = _findWakeMatch(heard);
     if (match != null) {
-      final now = DateTime.now();
-      if (_lastWakeAt != null && now.difference(_lastWakeAt!).inMilliseconds < 1800) {
-        return;
-      }
-      _lastWakeAt = now;
+      _handleWakeWord(match.trailingText);
+      // Stop this session immediately
       _handoffInProgress = true;
       _restartTimer?.cancel();
       _restartTimer = null;
       _isRunning = false;
-
-      developer.log(
-        'Wake word detected from "$heard" as "${match.matchedPhrase}". '
-        'Trailing: "${match.trailingText}"',
-        name: 'WakeWordService',
-      );
-
-      // Stop this session immediately so the caller can start a fresh,
-      // full-attention listen for the actual command if it wants to.
       _speech.stop();
-      onWakeWord?.call(match.trailingText);
 
-      // If the caller does not pause/resume the wake listener, recover by
-      // allowing normal restarts shortly after the handoff.
+      // Recover by allowing normal restarts shortly after the handoff.
       Timer(const Duration(seconds: 4), () {
         _handoffInProgress = false;
         if (_isEnabled && !_isPaused && !_speech.isListening) {
@@ -199,6 +243,25 @@ class WakeWordService {
       _restartSoon();
     }
   }
+
+  // ─── Shared wake-word handler (works for both Dart & native sources) ──
+
+  void _handleWakeWord(String trailingText) {
+    final now = DateTime.now();
+    if (_lastWakeAt != null && now.difference(_lastWakeAt!).inMilliseconds < 1800) {
+      return;  // Prevent double-triggering
+    }
+    _lastWakeAt = now;
+
+    developer.log(
+      'Wake word detected! Trailing: "$trailingText"',
+      name: 'WakeWordService',
+    );
+
+    onWakeWord?.call(trailingText);
+  }
+
+  // ─── Wake phrase matching ────────────────────────────────────────────
 
   static _WakeMatch? _findWakeMatch(String rawText) {
     final normalized = _normalizeForWake(rawText);
@@ -242,6 +305,10 @@ class WakeWordService {
     _handoffInProgress = false;
     _restartTimer?.cancel();
     _speech.stop();
+    // Don't stop the native foreground service on dispose —
+    // it should keep running so "Hey Nexa" works even when the app is closed.
+    // The native service is only stopped when the user explicitly disables
+    // wake word in Settings (via setEnabled(false)).
   }
 }
 

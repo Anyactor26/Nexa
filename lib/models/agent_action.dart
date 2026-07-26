@@ -28,6 +28,17 @@ class AgentAction {
     'read_notifications',
     'read_screen',
     'run_adb_command',
+    'run_root_command',
     'general_query',
+    // ─── File & Coding Operations (Agent-style, no Zarchiver needed) ───
+    'create_file',        // Create/overwrite a file with content
+    'create_directory',   // Create a directory (mkdir -p)
+    'read_file',          // Read a file's content
+    'edit_file',          // Overwrite a file with new content
+    'append_file',        // Append content to a file
+    'list_directory',     // List files in a directory
+    'delete_file',        // Delete a file
+    'delete_directory',   // Delete a directory recursively
+    'search_files',       // Search for files by name pattern
   ];
 }
