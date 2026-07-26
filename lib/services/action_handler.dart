@@ -6,7 +6,9 @@ import 'communication_service.dart';
 import 'alarm_service.dart';
 import 'system_control_service.dart';
 import 'shizuku_service.dart';
+import 'file_operation_service.dart';
 import 'screen_automation_service.dart';
+import 'remote_phone_control_service.dart';
 import 'task_executor.dart';
 import 'ai_service.dart';
 import 'file_operation_service.dart';
@@ -280,6 +282,23 @@ class ActionHandler {
           result = searchResult.success
               ? searchResult.details
               : 'Failed: ${searchResult.details}';
+          break;
+
+        // ─── Phone Lock / Unlock ────────────────────────────────────────
+
+        case 'lock_screen':
+          // Press power button via shell to lock screen
+          final lockResult = await _shizuku.runCommand('input keyevent 26');
+          result = 'Screen locked. (Power button pressed)';
+          break;
+
+        case 'unlock_screen':
+          // 1. Wake the screen by pressing power
+          await _shizuku.runCommand('input keyevent 26');
+          await Future.delayed(const Duration(milliseconds: 500));
+          // 2. Swipe up to dismiss keyguard
+          await _screenAutomation.swipe(540, 1800, 540, 300);
+          result = 'Screen unlocked. (Power + swipe up)\nNote: PIN/pattern locks need manual entry.';
           break;
 
         default:

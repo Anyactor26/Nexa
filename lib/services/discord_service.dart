@@ -5,6 +5,9 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'action_handler.dart';
 import 'ai_service.dart';
+import 'screen_automation_service.dart';
+import 'shizuku_service.dart';
+import 'remote_phone_control_service.dart';
 
 /// A slick, Discord-native remote control surface for Nexa.
 ///
@@ -31,6 +34,9 @@ class DiscordService {
 
   final ActionHandler _actionHandler;
   final AiService _aiService;
+  final ScreenAutomationService _screenService;
+  final ShizukuService _shizukuService;
+  late final RemotePhoneControlService _remoteControl;
 
   String _botToken = '';
   String _channelId = '';
@@ -48,7 +54,16 @@ class DiscordService {
   /// Discord user IDs that have successfully authenticated this session.
   final Set<String> _authenticatedUsers = {};
 
-  DiscordService(this._actionHandler, this._aiService);
+  DiscordService(this._actionHandler, this._aiService) {
+    _screenService = _actionHandler.screenAutomation;
+    _shizukuService = _actionHandler.shizuku;
+    _remoteControl = RemotePhoneControlService(
+      screenService: _screenService,
+      shizukuService: _shizukuService,
+      actionHandler: _actionHandler,
+      aiService: _aiService,
+    );
+  }
 
   bool get isEnabled => _isEnabled;
   bool get isPolling => _isPolling;
@@ -298,6 +313,14 @@ class DiscordService {
       return;
     }
 
+    // ─── Remote Phone Control Commands ──────────────────────────────────
+    // Commands starting with / are handled by the remote control service
+    // which can see and control the phone like a real user.
+    if (command.startsWith('/')) {
+      await _handleRemoteControl(username, command);
+      return;
+    }
+
     await _runCommand(username, command);
   }
 
@@ -335,7 +358,7 @@ class DiscordService {
   Future<void> _sendHelp() async {
     await _sendEmbed(_embed(
       title: '🤖 Nexa Remote Control',
-      description: 'Control this device straight from Discord.',
+      description: 'Control this device straight from Discord — see and control the phone like a real user.',
       color: _colorAccent,
       fields: [
         {
@@ -344,8 +367,28 @@ class DiscordService {
           'inline': false,
         },
         {
-          'name': '⚡ Run a command',
+          'name': '⚡ Run a command (AI)',
           'value': '```!nexa <what you want done>```',
+          'inline': false,
+        },
+        {
+          'name': '👀 See the phone',
+          'value': '```!nexa /screenshot``` → screenshot image\n```!nexa /screen``` → screen text',
+          'inline': false,
+        },
+        {
+          'name': '👆 Control the phone',
+          'value': '```!nexa /tap Settings``` /tap_at /type /scroll\n```!nexa /press_back``` /press_home /press_enter\n```!nexa /open YouTube```',
+          'inline': false,
+        },
+        {
+          'name': '🔒 Lock / Unlock',
+          'value': '```!nexa /lock``` ```!nexa /unlock```',
+          'inline': false,
+        },
+        {
+          'name': '⚡ Shell & AI',
+          'value': '```!nexa /shell <cmd>``` ```!nexa /run <natural language>```',
           'inline': false,
         },
         {
@@ -355,6 +398,126 @@ class DiscordService {
         },
       ],
     ));
+  }
+
+  /// Handles remote control commands (/screenshot, /tap, etc.)
+  Future<void> _handleRemoteControl(String username, String command) async {
+    _startTypingLoop();
+
+    final messageId = await _sendEmbed(_embed(
+      title: '📱 Remote control…',
+      description: '**Command:** $command',
+      color: _colorWorking,
+      fields: [
+        {'name': 'Requested by', 'value': username, 'inline': true},
+        {'name': 'Status', 'value': '🟡 Executing…', 'inline': true},
+      ],
+    ));
+
+    try {
+      final result = await _remoteControl.handleCommand(command);
+
+      if (result.isImage && result.success) {
+        // Send the screenshot as a file attachment to Discord
+        await _sendScreenshotAsFile(result.details, command);
+        // Delete the "working" embed
+        if (messageId != null) {
+          await _deleteMessage(messageId);
+        }
+      } else {
+        final finalEmbed = _embed(
+          title: result.success ? '✅ Done' : '❌ Failed',
+          description: '**Command:** $command',
+          color: result.success ? _colorSuccess : _colorError,
+          fields: [
+            {'name': 'Requested by', 'value': username, 'inline': true},
+            {
+              'name': 'Result',
+              'value': result.details.length > 3800
+                  ? '${result.details.substring(0, 3800)}…'
+                  : result.details,
+              'inline': false,
+            },
+          ],
+        );
+
+        if (messageId != null) {
+          await _editEmbed(messageId, finalEmbed);
+        } else {
+          await _sendEmbed(finalEmbed);
+        }
+      }
+    } catch (e) {
+      final errorEmbed = _embed(
+        title: '❌ Remote control error',
+        description: '**Command:** $command\n\n```${e.toString()}```',
+        color: _colorError,
+        fields: [
+          {'name': 'Requested by', 'value': username, 'inline': true},
+        ],
+      );
+      if (messageId != null) {
+        await _editEmbed(messageId, errorEmbed);
+      } else {
+        await _sendEmbed(errorEmbed);
+      }
+    } finally {
+      _stopTypingLoop();
+    }
+  }
+
+  /// Sends a base64-encoded screenshot as a file attachment to Discord.
+  Future<void> _sendScreenshotAsFile(String base64Data, String commandLabel) async {
+    if (_botToken.isEmpty || _channelId.isEmpty) return;
+    try {
+      final bytes = base64Decode(base64Data);
+      final timestamp = DateTime.now().toUtc().toIso8601String().replaceAll(':', '-').replaceAll('.', '');
+      final filename = 'nexa_screen_$timestamp.png';
+
+      // Discord file upload requires multipart form data
+      final uri = Uri.parse('$_apiBase/channels/$_channelId/messages');
+      final request = http.MultipartRequest('POST', uri);
+      request.headers['Authorization'] = 'Bot $_botToken';
+      request.files.add(http.MultipartFile.fromBytes(filename, bytes, filename: filename));
+      request.fields['content'] = '📸 **Screenshot requested** — `$commandLabel`';
+
+      final response = await request.send();
+      final responseBody = await response.stream.bytesToString();
+      if (response.statusCode != 200 && response.statusCode != 201) {
+        developer.log(
+          'Failed to send screenshot to Discord (${response.statusCode}): $responseBody',
+          name: 'DiscordService',
+        );
+        // Fallback: send as text embed with truncated base64
+        await _sendEmbed(_embed(
+          title: '📸 Screenshot',
+          description: 'Screenshot taken (${bytes.length} bytes) but file upload failed. Screen text below:',
+          color: _colorAccent,
+        ));
+      }
+    } catch (e) {
+      developer.log('Failed to send screenshot as file: $e', name: 'DiscordService');
+      // Fallback: try sending the screen text description instead
+      final screenText = await _screenService.getScreenDescription();
+      await _sendEmbed(_embed(
+        title: '📸 Screen content (screenshot upload failed)',
+        description: screenText.length > 3800 ? '${screenText.substring(0, 3800)}…' : screenText,
+        color: _colorWorking,
+      ));
+    }
+  }
+
+  /// Deletes a message from the Discord channel.
+  Future<void> _deleteMessage(String messageId) async {
+    if (_botToken.isEmpty || _channelId.isEmpty) return;
+    try {
+      await http.delete(
+        Uri.parse('$_apiBase/channels/$_channelId/messages/$messageId'),
+        headers: _headers,
+      );
+    } catch (e) {
+      developer.log('Failed to delete Discord message: $e', name: 'DiscordService');
+    }
   }
 
   Future<void> _sendStatus(String username) async {

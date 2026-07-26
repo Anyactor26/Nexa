@@ -29,6 +29,8 @@ class LocalCommandRouter {
     _matchVolume,
     _matchBrightness,
     _matchOpenApp,
+    _matchLockScreen,
+    _matchUnlockScreen,
     _matchCreateFile,
     _matchCreateDirectory,
     _matchReadFile,
@@ -204,6 +206,62 @@ class LocalCommandRouter {
       params: {'app_name': appName},
       response: 'Opening $appName...',
     );
+  }
+
+  // ─── Lock / Unlock Screen ─────────────────────────────────────────────
+
+  static final RegExp _lockScreenRegex = RegExp(
+    r'^(?:please\s+)?(?:lock|sleep)\s+(?:the\s+)?(?:phone|screen|device|mobile)(?:\s+(?:screen|display))?\.?$',
+    caseSensitive: false,
+  );
+
+  static final RegExp _lockScreenSimpleRegex = RegExp(
+    r'^(?:please\s+)?(?:lock)\s+(?:my|the)\s+(?:phone|screen)',
+    caseSensitive: false,
+  );
+
+  static AgentAction? _matchLockScreen(String text) {
+    if (_lockScreenRegex.firstMatch(text) != null || _lockScreenSimpleRegex.firstMatch(text) != null) {
+      return AgentAction(
+        action: 'lock_screen',
+        params: {},
+        response: 'Locking the screen…',
+      );
+    }
+    // Also catch simpler forms
+    final lower = text.toLowerCase().trim();
+    if (lower == 'lock phone' || lower == 'lock screen' || lower == 'lock my phone' || lower == 'lock the phone' || lower == 'sleep the phone') {
+      return AgentAction(
+        action: 'lock_screen',
+        params: {},
+        response: 'Locking the screen…',
+      );
+    }
+    return null;
+  }
+
+  static final RegExp _unlockScreenRegex = RegExp(
+    r'^(?:please\s+)?(?:unlock|wake|wake up)\s+(?:the\s+)?(?:phone|screen|device|mobile)',
+    caseSensitive: false,
+  );
+
+  static AgentAction? _matchUnlockScreen(String text) {
+    if (_unlockScreenRegex.firstMatch(text) != null) {
+      return AgentAction(
+        action: 'unlock_screen',
+        params: {},
+        response: 'Unlocking the screen…',
+      );
+    }
+    final lower = text.toLowerCase().trim();
+    if (lower == 'unlock phone' || lower == 'unlock screen' || lower == 'unlock my phone' || lower == 'wake the phone' || lower == 'wake up the phone' || lower == 'wake phone') {
+      return AgentAction(
+        action: 'unlock_screen',
+        params: {},
+        response: 'Unlocking the screen…',
+      );
+    }
+    return null;
   }
 
   // ─── File & Coding Operations ───────────────────────────────────────

@@ -6,16 +6,11 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
-import android.content.SharedPreferences
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
-import android.os.IInterface
 import android.os.Looper
-import android.os.ParcelFileDescriptor
-import android.os.RemoteException
-import android.preference.PreferenceManager
 import android.speech.RecognitionListener
 import android.speech.SpeechRecognizer
 import android.util.Log
@@ -27,7 +22,7 @@ import androidx.core.app.NotificationCompat
 ///
 /// When the wake word is detected, it:
 ///   1. Launches the Nexa MainActivity to the foreground
-///   2. Sends a "wake word detected" signal via a MethodChannel extra
+///   2. Sends a "wake word detected" signal via intent extras
 ///   3. Pauses listening briefly to avoid double-triggering
 ///
 /// Android requires FOREGROUND_SERVICE_MICROPHONE (API 34+) for mic access
@@ -43,7 +38,6 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         const val ACTION_STOP = "com.nexa.agent.STOP_WAKE_WORD"
         const val EXTRA_WAKE_WORD_DETECTED = "wake_word_detected"
         const val EXTRA_TRAILING_TEXT = "trailing_text"
-        const val PREFS_KEY = "wake_word_enabled"
 
         // Known wake phrase variants (matching Dart-side patterns)
         val WAKE_PHRASES = listOf(
@@ -53,6 +47,10 @@ class WakeWordForegroundService : Service(), RecognitionListener {
             "hey alexa", "hey lexa",  // common misrecognitions
             "nexa wake up", "nexus wake up", "nexa start listening"
         )
+
+        // Lock/unlock phone command constants for the native layer
+        const val ACTION_LOCK_SCREEN = "com.nexa.agent.LOCK_SCREEN"
+        const val ACTION_UNLOCK_SCREEN = "com.nexa.agent.UNLOCK_SCREEN"
     }
 
     private var speechRecognizer: SpeechRecognizer? = null
@@ -61,9 +59,6 @@ class WakeWordForegroundService : Service(), RecognitionListener {
     private val handler = Handler(Looper.getMainLooper())
     private var lastWakeTime: Long = 0
     private val MIN_WAKE_INTERVAL_MS = 3000L  // Prevent double-triggering
-
-    // Flutter method channel for communicating wake events back
-    private var wakeEventChannel: android.os.IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -82,9 +77,19 @@ class WakeWordForegroundService : Service(), RecognitionListener {
             return START_NOT_STICKY
         }
 
+        // Handle lock/unlock commands from the service layer
+        if (intent?.action == ACTION_LOCK_SCREEN) {
+            lockScreen()
+            return START_STICKY
+        }
+        if (intent?.action == ACTION_UNLOCK_SCREEN) {
+            unlockScreen()
+            return START_STICKY
+        }
+
         // Start as foreground service with persistent notification
         val notification = buildNotification("Listening for \"Hey Nexa\"…")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(NOTIFICATION_ID, notification,
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
@@ -100,6 +105,87 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         Log.d(TAG, "WakeWordForegroundService destroyed")
         stopListening()
         super.onDestroy()
+    }
+
+    // ─── Lock / Unlock Screen ──────────────────────────────────────────
+
+    /// Locks the screen by pressing the POWER key (keyevent 26).
+    /// This works from a foreground service without Shizuku/root.
+    private fun lockScreen() {
+        Log.d(TAG, "Locking screen")
+        try {
+            // Use the accessibility service if available for a more reliable lock
+            val service = AgentAccessibilityService.instance
+            if (service != null) {
+                // Accessibility service can perform GLOBAL_ACTION_LOCK_SCREEN on API 28+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
+                    Log.d(TAG, "Locked screen via accessibility GLOBAL_ACTION_LOCK_SCREEN")
+                } else {
+                    // Pre-API 28: use power keyevent via accessibility dispatchGesture or shell
+                    service.dispatchGesture(android.accessibilityservice.AccessibilityService.GestureDescription(
+                        android.graphics.Path(), 0, 0
+                    ), null, null)
+                    // Fallback: shell command
+                    Runtime.getRuntime().exec(arrayOf("/system/bin/sh", "-c", "input keyevent 26"))
+                    Log.d(TAG, "Locked screen via power keyevent (fallback)")
+                }
+            } else {
+                // No accessibility service — use shell command from FG service
+                Runtime.getRuntime().exec(arrayOf("/system/bin/sh", "-c", "input keyevent 26"))
+                Log.d(TAG, "Locked screen via shell power keyevent")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to lock screen: ${e.message}")
+        }
+    }
+
+    /// Wakes and unlocks the screen. This uses the accessibility service
+    /// to wake the screen (power keyevent) and then dismiss the keyguard
+    /// (GLOBAL_ACTION_DISMISS_KEYGUARD on API 28+).
+    /// Requires the accessibility service to be enabled.
+    private fun unlockScreen() {
+        Log.d(TAG, "Unlocking screen")
+        try {
+            // First: wake the screen by pressing power
+            Runtime.getRuntime().exec(arrayOf("/system/bin/sh", "-c", "input keyevent 26"))
+            Thread.sleep(500) // Wait for screen to wake
+
+            // Then: dismiss the keyguard using accessibility service
+            val service = AgentAccessibilityService.instance
+            if (service != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    // GLOBAL_ACTION_DISMISS_KEYGUARD requires the service to be
+                    // declared with FLAG_REQUEST_DISMISS_KEYGUARD in its metadata.
+                    service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_DISMISS_KEYGUARD)
+                    Log.d(TAG, "Dismissed keyguard via accessibility service")
+                } else {
+                    // Pre-API 28: swipe up gesture to unlock
+                    val path = android.graphics.Path()
+                    path.moveTo(540f, 1800f)
+                    path.lineTo(540f, 300f)
+                    val gesture = android.accessibilityservice.AccessibilityService.GestureDescription(
+                        path, 0, 500
+                    )
+                    service.dispatchGesture(gesture, null, null)
+                    Log.d(TAG, "Attempted unlock via swipe gesture")
+                }
+
+                // Also launch Nexa app to foreground
+                val launchIntent = Intent(this, MainActivity::class.java)
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                startActivity(launchIntent)
+            } else {
+                // No accessibility service — wake the screen at least
+                // (can't dismiss keyguard without accessibility)
+                Log.w(TAG, "Accessibility service not running — can only wake screen, not dismiss keyguard")
+                val launchIntent = Intent(this, MainActivity::class.java)
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                startActivity(launchIntent)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to unlock screen: ${e.message}")
+        }
     }
 
     // ─── Speech Recognition ────────────────────────────────────────────
@@ -121,7 +207,6 @@ class WakeWordForegroundService : Service(), RecognitionListener {
             listenIntent.putExtra(android.speech.RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
             listenIntent.putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             listenIntent.putExtra(android.speech.RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            // Keep listening for a longer window to catch the wake phrase
             listenIntent.putExtra(android.speech.RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 5000L)
             listenIntent.putExtra(android.speech.RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
 
@@ -131,19 +216,14 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start listening: ${e.message}")
             isListening = false
-            // Retry after a delay
             handler.postDelayed({ startListening() }, 2000)
         }
     }
 
     private fun stopListening() {
         isListening = false
-        try {
-            speechRecognizer?.stopListening()
-        } catch (_: Exception) {}
-        try {
-            speechRecognizer?.destroy()
-        } catch (_: Exception) {}
+        try { speechRecognizer?.stopListening() } catch (_: Exception) {}
+        try { speechRecognizer?.destroy() } catch (_: Exception) {}
         speechRecognizer = null
     }
 
@@ -172,12 +252,10 @@ class WakeWordForegroundService : Service(), RecognitionListener {
     override fun onEndOfSpeech() {
         Log.d(TAG, "End of speech")
         isListening = false
-        // Restart listening to keep the loop going
         if (!isPaused) restartListening(500)
     }
 
     override fun onPartialResults(partialResults: Bundle?) {
-        // Check partial results for wake word — faster detection
         val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
         if (matches != null) {
             for (match in matches) {
@@ -202,7 +280,6 @@ class WakeWordForegroundService : Service(), RecognitionListener {
             }
         }
 
-        // No wake word found — restart listening
         if (!isPaused) restartListening(400)
     }
 
@@ -211,9 +288,6 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         Log.e(TAG, "Speech recognition error: $error ($errorMsg)")
         isListening = false
 
-        // Errors 6 (no speech) and 7 (no match) are normal — just restart
-        // Error 1 (network) — restart after longer delay
-        // Error 2 (client) — may need to recreate recognizer
         val restartDelay = when (error) {
             6, 7 -> 400L   // No speech / no match — normal, restart quickly
             1, 2 -> 3000L  // Network / client side — longer delay
@@ -224,9 +298,7 @@ class WakeWordForegroundService : Service(), RecognitionListener {
 
         // For client-side errors, recreate the recognizer
         if (error == 2 || error == 9) {
-            try {
-                speechRecognizer?.destroy()
-            } catch (_: Exception) {}
+            try { speechRecognizer?.destroy() } catch (_: Exception) {}
             speechRecognizer = null
         }
 
@@ -262,9 +334,6 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         for (phrase in WAKE_PHRASES) {
             val idx = normalized.indexOf(phrase)
             if (idx >= 0) {
-                val trailing = normalized.substring(idx + phrase.length).trim()
-                // Map trailing back from normalized to original text
-                // Just return the original text after the wake phrase position
                 val originalAfterWake = text.substring(
                     minOf(idx + phrase.length, text.length)
                 ).trim()
@@ -291,7 +360,6 @@ class WakeWordForegroundService : Service(), RecognitionListener {
         isListening = false
         try { speechRecognizer?.stopListening() } catch (_: Exception) {}
 
-        // Update notification
         updateNotification("Wake word detected! Opening Nexa…")
 
         // Launch the Nexa app to foreground with wake word data
@@ -316,7 +384,7 @@ class WakeWordForegroundService : Service(), RecognitionListener {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "Nexa Wake Word Listener",
-                NotificationManager.IMPORTANCE_LOW  // Low priority — no sound/vibration
+                NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Continuously listens for the \"Hey Nexa\" wake phrase"
                 setShowBadge(false)
@@ -363,8 +431,6 @@ class WakeWordForegroundService : Service(), RecognitionListener {
             Log.e(TAG, "Failed to update notification: ${e.message}")
         }
     }
-
-    // ─── Helpers ────────────────────────────────────────────────────────
 
     private fun getErrorDescription(error: Int): String {
         return when (error) {

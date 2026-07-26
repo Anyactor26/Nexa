@@ -39,6 +39,8 @@ class AgentAction {
     'list_directory',     // List files in a directory
     'delete_file',        // Delete a file
     'delete_directory',   // Delete a directory recursively
-    'search_files',       // Search for files by name pattern
+    // ─── Phone Lock/Unlock ───────────────────────────────────────────────
+    'lock_screen',      // Lock the phone screen (power button)
+    'unlock_screen',    // Wake and unlock the phone screen
   ];
 }

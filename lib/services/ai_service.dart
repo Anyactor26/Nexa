@@ -129,6 +129,13 @@ FILE OPERATIONS (create, read, edit, and manage files directly):
 - delete_directory: {"path": "/sdcard/NexaAgent/myproject"} - Delete a directory and all contents
 - search_files: {"directory": "/sdcard/NexaAgent", "pattern": "*.py"} - Search for files matching a pattern
 
+PHONE LOCK/UNLOCK:
+- lock_screen: {} - Lock the phone screen (presses power button)
+- unlock_screen: {} - Wake and unlock the phone screen (wakes screen + swipe to dismiss keyguard)
+
+Use lock_screen when someone says "lock my phone", "lock the screen", etc.
+Use unlock_screen when someone says "unlock my phone", "wake up the phone", "turn on the screen", etc.
+
 CODING WORKFLOW EXAMPLES:
 - "Write a Python script that prints hello" → create_file with path=/sdcard/NexaAgent/hello.py, content=print('hello')
 - "Create a web app with index.html" → create_file with the HTML content
