@@ -29,6 +29,12 @@ class LocalCommandRouter {
     _matchVolume,
     _matchBrightness,
     _matchOpenApp,
+    _matchLockScreen,
+    _matchUnlockScreen,
+    _matchCreateFile,
+    _matchCreateDirectory,
+    _matchReadFile,
+    _matchListDirectory,
     _matchRunRootCommand,
     _matchRunCommand,
   ];
@@ -199,6 +205,166 @@ class LocalCommandRouter {
       action: 'open_app',
       params: {'app_name': appName},
       response: 'Opening $appName...',
+    );
+  }
+
+  // ─── Lock / Unlock Screen ─────────────────────────────────────────────
+
+  static final RegExp _lockScreenRegex = RegExp(
+    r'^(?:please\s+)?(?:lock|sleep)\s+(?:the\s+)?(?:phone|screen|device|mobile)(?:\s+(?:screen|display))?\.?$',
+    caseSensitive: false,
+  );
+
+  static final RegExp _lockScreenSimpleRegex = RegExp(
+    r'^(?:please\s+)?(?:lock)\s+(?:my|the)\s+(?:phone|screen)',
+    caseSensitive: false,
+  );
+
+  static AgentAction? _matchLockScreen(String text) {
+    if (_lockScreenRegex.firstMatch(text) != null || _lockScreenSimpleRegex.firstMatch(text) != null) {
+      return AgentAction(
+        action: 'lock_screen',
+        params: {},
+        response: 'Locking the screen…',
+      );
+    }
+    // Also catch simpler forms
+    final lower = text.toLowerCase().trim();
+    if (lower == 'lock phone' || lower == 'lock screen' || lower == 'lock my phone' || lower == 'lock the phone' || lower == 'sleep the phone') {
+      return AgentAction(
+        action: 'lock_screen',
+        params: {},
+        response: 'Locking the screen…',
+      );
+    }
+    return null;
+  }
+
+  static final RegExp _unlockScreenRegex = RegExp(
+    r'^(?:please\s+)?(?:unlock|wake|wake up)\s+(?:the\s+)?(?:phone|screen|device|mobile)',
+    caseSensitive: false,
+  );
+
+  static AgentAction? _matchUnlockScreen(String text) {
+    if (_unlockScreenRegex.firstMatch(text) != null) {
+      return AgentAction(
+        action: 'unlock_screen',
+        params: {},
+        response: 'Unlocking the screen…',
+      );
+    }
+    final lower = text.toLowerCase().trim();
+    if (lower == 'unlock phone' || lower == 'unlock screen' || lower == 'unlock my phone' || lower == 'wake the phone' || lower == 'wake up the phone' || lower == 'wake phone') {
+      return AgentAction(
+        action: 'unlock_screen',
+        params: {},
+        response: 'Unlocking the screen…',
+      );
+    }
+    return null;
+  }
+
+  // ─── File & Coding Operations ───────────────────────────────────────
+
+  // "create a file called X with content Y" / "write a file X containing Y"
+  static final RegExp _createFileRegex = RegExp(
+    r'^(?:please\s+)?(?:create|make|write)\s+(?:a\s+)?(?:file|script)\s+(?:called|named|at|to|in)?\s*"?([^"]+)"?\s+(?:with|containing|that\s+contains|that\s+has)\s+(.+)$',
+    caseSensitive: false,
+  );
+
+  static final RegExp _createFileSimpleRegex = RegExp(
+    r'^(?:please\s+)?(?:create|make|write)\s+(?:a\s+)?(?:file|script)\s+(?:called|named|at|to|in)?\s*"?([^"]+)"?$',
+    caseSensitive: false,
+  );
+
+  static AgentAction? _matchCreateFile(String text) {
+    // Match "create a file called X with content Y"
+    final match = _createFileRegex.firstMatch(text);
+    if (match != null) {
+      final path = match.group(1)?.trim() ?? '';
+      final content = match.group(2)?.trim() ?? '';
+      if (path.isEmpty) return null;
+      return AgentAction(
+        action: 'create_file',
+        params: {'path': path, 'content': content},
+        response: 'Creating file $path…',
+      );
+    }
+
+    // Match "create a file called X" (no content — will need AI to fill it)
+    final simpleMatch = _createFileSimpleRegex.firstMatch(text);
+    if (simpleMatch != null) {
+      final path = simpleMatch.group(1)?.trim() ?? '';
+      if (path.isEmpty) return null;
+      // If the command doesn't include content, let the AI fill it
+      return null; // Fall through to AI so it can generate the content
+    }
+
+    return null;
+  }
+
+  static final RegExp _createDirRegex = RegExp(
+    r'^(?:please\s+)?(?:create|make)\s+(?:a\s+)?(?:folder|directory|dir)\s+(?:called|named|at|to|in)?\s*"?([^"]+)"?$',
+    caseSensitive: false,
+  );
+
+  static AgentAction? _matchCreateDirectory(String text) {
+    final match = _createDirRegex.firstMatch(text);
+    if (match == null) return null;
+    final path = match.group(1)?.trim() ?? '';
+    if (path.isEmpty) return null;
+
+    return AgentAction(
+      action: 'create_directory',
+      params: {'path': path},
+      response: 'Creating directory $path…',
+    );
+  }
+
+  static final RegExp _readFileRegex = RegExp(
+    r'^(?:please\s+)?(?:read|show|display|open|view|cat)\s+(?:the\s+)?(?:file|contents\s+of|content\s+of)?\s*"?([^"]+)"?$',
+    caseSensitive: false,
+  );
+
+  static AgentAction? _matchReadFile(String text) {
+    final match = _readFileRegex.firstMatch(text);
+    if (match == null) return null;
+    final path = match.group(1)?.trim() ?? '';
+    if (path.isEmpty) return null;
+
+    // Only match if the path looks like a file path (contains / or known extension)
+    if (!path.contains('/') && !_hasKnownExtension(path)) return null;
+
+    return AgentAction(
+      action: 'read_file',
+      params: {'path': path},
+      response: 'Reading file $path…',
+    );
+  }
+
+  static bool _hasKnownExtension(String path) {
+    final extensions = ['.py', '.js', '.ts', '.html', '.css', '.json', '.xml',
+      '.yaml', '.yml', '.txt', '.md', '.sh', '.java', '.kt', '.c', '.cpp',
+      '.h', '.rb', '.go', '.rs', '.swift', '.dart', '.sql', '.env', '.cfg',
+      '.ini', '.toml', '.csv'];
+    return extensions.any((ext) => path.toLowerCase().endsWith(ext));
+  }
+
+  static final RegExp _listDirRegex = RegExp(
+    r'^(?:please\s+)?(?:list|show|ls)\s+(?:the\s+)?(?:files|contents|items)\s+(?:in|of|at)\s*"?([^"]+)"?$',
+    caseSensitive: false,
+  );
+
+  static AgentAction? _matchListDirectory(String text) {
+    final match = _listDirRegex.firstMatch(text);
+    if (match == null) return null;
+    final path = match.group(1)?.trim() ?? '';
+    if (path.isEmpty) return null;
+
+    return AgentAction(
+      action: 'list_directory',
+      params: {'path': path},
+      response: 'Listing directory $path…',
     );
   }
 

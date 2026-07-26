@@ -17,6 +17,9 @@
         android:name="android.permission.SYSTEM_ALERT_WINDOW"
         tools:node="remove" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Required so the wake-word foreground service restarts after a device reboot -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- For speech recognition -->
     <queries>
@@ -84,6 +87,32 @@
             android:enabled="true"
             android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <!-- Wake Word Foreground Service — listens for "Hey Nexa" even when
+             the app is closed/backgrounded.  foregroundServiceType=microphone
+             is required on Android 14+ (API 34) for mic access in an FG service. -->
+        <service
+            android:name=".WakeWordForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone"
+            android:label="Nexa Wake Word Listener"
+            android:stopWithTask="false">
+            <intent-filter>
+                <action android:name="com.nexa.agent.START_WAKE_WORD" />
+                <action android:name="com.nexa.agent.STOP_WAKE_WORD" />
+            </intent-filter>
+        </service>
+
+        <!-- Boot receiver: automatically restart the wake-word listener when
+             the device reboots (only if the user previously enabled it). -->
+        <receiver
+            android:name=".WakeWordBootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
 
         <!-- Accessibility Service for screen reading and UI automation -->
         <service

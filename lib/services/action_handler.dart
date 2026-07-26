@@ -6,6 +6,7 @@ import 'communication_service.dart';
 import 'alarm_service.dart';
 import 'system_control_service.dart';
 import 'shizuku_service.dart';
+import 'file_operation_service.dart';
 import 'screen_automation_service.dart';
 import 'task_executor.dart';
 import 'ai_service.dart';
@@ -18,9 +19,15 @@ class ActionHandler {
   final SystemControlService _systemControl = SystemControlService();
   final ShizukuService _shizuku = ShizukuService();
   final ScreenAutomationService _screenAutomation = ScreenAutomationService();
+  late final FileOperationService _fileOps;
 
   ShizukuService get shizuku => _shizuku;
   ScreenAutomationService get screenAutomation => _screenAutomation;
+  FileOperationService get fileOps => _fileOps;
+
+  ActionHandler() {
+    _fileOps = FileOperationService(_shizuku);
+  }
 
   /// The currently running task executor, if any
   TaskExecutor? _currentExecutor;
@@ -167,6 +174,145 @@ class ActionHandler {
           );
           result = await _currentExecutor!.executeTask(goal);
           _currentExecutor = null;
+          break;
+
+        // ─── File & Coding Operations (Agent-style) ───────────────────
+
+        case 'create_file':
+          final filePath = action.params['path'] as String? ?? '';
+          final content = action.params['content'] as String? ?? '';
+          if (filePath.isEmpty) {
+            result = 'No file path provided.';
+            break;
+          }
+          final fileResult = await _fileOps.createFile(filePath, content);
+          result = fileResult.success
+              ? fileResult.details
+              : 'Failed: ${fileResult.details}';
+          break;
+
+        case 'create_directory':
+          final dirPath = action.params['path'] as String? ?? '';
+          if (dirPath.isEmpty) {
+            result = 'No directory path provided.';
+            break;
+          }
+          final dirResult = await _fileOps.createDirectory(dirPath);
+          result = dirResult.success
+              ? dirResult.details
+              : 'Failed: ${dirResult.details}';
+          break;
+
+        case 'read_file':
+          final filePath = action.params['path'] as String? ?? '';
+          if (filePath.isEmpty) {
+            result = 'No file path provided.';
+            break;
+          }
+          final readResult = await _fileOps.readFile(filePath);
+          result = readResult.success
+              ? readResult.details
+              : 'Failed: ${readResult.details}';
+          break;
+
+        case 'edit_file':
+          final filePath = action.params['path'] as String? ?? '';
+          final newContent = action.params['content'] as String? ?? '';
+          if (filePath.isEmpty) {
+            result = 'No file path provided.';
+            break;
+          }
+          final editResult = await _fileOps.editFile(filePath, newContent);
+          result = editResult.success
+              ? editResult.details
+              : 'Failed: ${editResult.details}';
+          break;
+
+        case 'append_file':
+          final filePath = action.params['path'] as String? ?? '';
+          final appendContent = action.params['content'] as String? ?? '';
+          if (filePath.isEmpty) {
+            result = 'No file path provided.';
+            break;
+          }
+          final appendResult = await _fileOps.appendToFile(filePath, appendContent);
+          result = appendResult.success
+              ? appendResult.details
+              : 'Failed: ${appendResult.details}';
+          break;
+
+        case 'list_directory':
+          final dirPath = action.params['path'] as String? ?? '/sdcard';
+          final listResult = await _fileOps.listDirectory(dirPath);
+          result = listResult.success
+              ? listResult.details
+              : 'Failed: ${listResult.details}';
+          break;
+
+        case 'delete_file':
+          final filePath = action.params['path'] as String? ?? '';
+          if (filePath.isEmpty) {
+            result = 'No file path provided.';
+            break;
+          }
+          final delResult = await _fileOps.deleteFile(filePath);
+          result = delResult.success
+              ? delResult.details
+              : 'Failed: ${delResult.details}';
+          break;
+
+        case 'delete_directory':
+          final dirPath = action.params['path'] as String? ?? '';
+          if (dirPath.isEmpty) {
+            result = 'No directory path provided.';
+            break;
+          }
+          final delDirResult = await _fileOps.deleteDirectory(dirPath);
+          result = delDirResult.success
+              ? delDirResult.details
+              : 'Failed: ${delDirResult.details}';
+          break;
+
+        case 'search_files':
+          final directory = action.params['directory'] as String? ?? '/sdcard';
+          final pattern = action.params['pattern'] as String? ?? '*';
+          final searchResult = await _fileOps.searchFiles(directory, pattern);
+          result = searchResult.success
+              ? searchResult.details
+              : 'Failed: ${searchResult.details}';
+          break;
+
+        // ─── Phone Lock / Unlock ────────────────────────────────────────
+
+        case 'lock_screen':
+          // Press power button via shell to lock screen
+          await _shizuku.runCommand('input keyevent 26');
+          result = 'Screen locked. (Power button pressed)';
+          break;
+
+        case 'unlock_screen':
+          // 1. Wake the screen by pressing power
+          await _shizuku.runCommand('input keyevent 26');
+          await Future.delayed(const Duration(milliseconds: 500));
+          // 2. Swipe up to dismiss keyguard
+          await _screenAutomation.swipe(540, 1800, 540, 300);
+          result = 'Screen unlocked. (Power + swipe up)\nNote: PIN/pattern locks need manual entry.';
+          break;
+
+        // ─── Screenshare (live remote view) ──────────────────────────────
+
+        case 'screenshare':
+          // Screenshare is handled by the remote control service directly,
+          // not here — the action is listed for the AI to recognize, but
+          // actual stream management goes through ScreenshareService.
+          final seconds = (action.params['seconds'] as num?)?.toInt() ?? 3;
+          result = 'Screenshare can only be started via Discord/Telegram remote control. '
+              'Use /stream $seconds in your bot channel to start a live stream.';
+          break;
+
+        case 'stop_screenshare':
+          result = 'Screenshare can only be stopped via Discord/Telegram remote control. '
+              'Use /stopstream in your bot channel to end the stream.';
           break;
 
         default:

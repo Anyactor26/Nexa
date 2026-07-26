@@ -7,6 +7,11 @@ import 'config/feature_flags.dart';
 import 'screens/home_screen.dart';
 import 'screens/onboarding_screen.dart';
 import 'overlay_main.dart';
+import 'services/ai_service.dart';
+import 'services/action_handler.dart';
+import 'services/telegram_service.dart';
+import 'services/discord_service.dart';
+import 'services/wake_word_service.dart';
 
 @pragma("vm:entry-point")
 void overlayMain() {
@@ -39,11 +44,41 @@ void overlayMain() {
 
 final ValueNotifier<ThemeMode> themeNotifier = ValueNotifier(ThemeMode.system);
 
+/// ─── Global Service Singletons ─────────────────────────────────────────
+/// These services persist across the entire app lifecycle — they are NOT
+/// tied to any individual screen's widget lifecycle. This ensures:
+///   • Discord/Telegram bots keep polling even when the HomeScreen is
+///     backgrounded or the user navigates to Settings.
+///   • The wake-word listener can restart from the native foreground service
+///     without needing a fresh HomeScreen to be mounted.
+late final AiService globalAiService;
+late final ActionHandler globalActionHandler;
+late final TelegramService globalTelegramService;
+late final DiscordService globalDiscordService;
+late final WakeWordService globalWakeWordService;
+
 void Function(String task)? onOverlayTask;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // ─── Initialize global services ─────────────────────────────────────
+  globalAiService = AiService();
+  globalActionHandler = ActionHandler();
+  globalTelegramService = TelegramService(globalActionHandler, globalAiService);
+  globalDiscordService = DiscordService(globalActionHandler, globalAiService);
+  globalWakeWordService = WakeWordService();
+
+  // Initialize AI service first (other services depend on it)
+  await globalAiService.init();
+
+  // Initialize remote control bots — these start polling immediately if
+  // they were previously enabled, so the user doesn't have to open the
+  // app for Discord/Telegram to respond.
+  await globalTelegramService.init();
+  await globalDiscordService.init();
+
+  // ─── Overlay window listener ─────────────────────────────────────────
   if (FeatureFlags.floatingOverlayEnabled) {
     FlutterOverlayWindow.overlayListener.listen((event) {
       log("Main app received from overlay: $event");
@@ -57,6 +92,13 @@ void main() async {
     });
   }
 
+  // ─── Wake word service ───────────────────────────────────────────────
+  // The WakeWordService will start the native foreground service if the
+  // user has previously enabled it. The native service survives process
+  // kills, so "Hey Nexa" works even when the app is completely closed.
+  await globalWakeWordService.init(onWakeWord: _onGlobalWakeWordDetected);
+
+  // ─── Theme ────────────────────────────────────────────────────────────
   final prefs = await SharedPreferences.getInstance();
   final themeStr = prefs.getString('themeMode');
   if (themeStr == 'dark') {
@@ -68,6 +110,35 @@ void main() async {
   final onboardingCompleted = prefs.getBool('onboarding_completed') ?? false;
 
   runApp(NexaApp(onboardingCompleted: onboardingCompleted));
+}
+
+/// Global wake word handler. This fires regardless of which screen is
+/// currently mounted. The native foreground service sends the wake word
+/// event via MethodChannel, and the Dart-side WakeWordService also fires
+/// here when the app is foregrounded.
+///
+/// Since HomeScreen registers its own per-screen callback, we store the
+/// detected text so HomeScreen can pick it up when it's mounted.
+String? _pendingWakeWordText;
+
+void _onGlobalWakeWordDetected(String trailingText) {
+  log("Global wake word detected! Trailing: '$trailingText'");
+  _pendingWakeWordText = trailingText;
+
+  // If the HomeScreen is currently mounted and has registered its
+  // overlay-task handler, send the command immediately.
+  if (onOverlayTask != null && trailingText.trim().isNotEmpty) {
+    onOverlayTask!(trailingText.trim());
+    _pendingWakeWordText = null;
+  }
+}
+
+/// Called by HomeScreen when it mounts — picks up any wake-word command
+/// that was received before the screen was ready.
+String? consumePendingWakeWord() {
+  final text = _pendingWakeWordText;
+  _pendingWakeWordText = null;
+  return text;
 }
 
 class NexaApp extends StatelessWidget {

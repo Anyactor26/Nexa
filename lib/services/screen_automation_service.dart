@@ -340,6 +340,16 @@ class ScreenAutomationService {
     }
   }
 
+  /// Long press at specific screen coordinates
+  Future<bool> longPressAt(double x, double y) async {
+    try {
+      return await _channel
+              .invokeMethod<bool>('longPressAt', {'x': x, 'y': y}) ?? false;
+    } catch (e) {
+      return false;
+    }
+  }
+
   /// Get current foreground app package name
   Future<String?> getCurrentPackage() async {
     try {

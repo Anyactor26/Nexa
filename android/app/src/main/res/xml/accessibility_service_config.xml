@@ -1,11 +1,13 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0.0" encoding="utf-8"?>
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/accessibility_service_description"
     android:accessibilityEventTypes="typeAllMask"
-    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagRequestTouchExplorationMode|flagRetrieveInteractiveWindows"
+    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagRequestTouchExplorationMode|flagRetrieveInteractiveWindows|flagRequestAccessibilityButton|flagRequestDismissKeyguard"
     android:canRetrieveWindowContent="true"
     android:canPerformGestures="true"
     android:canTakeScreenshot="true"
+    android:canRequestFilterKeyEvents="true"
+    android:canControlMagnification="false"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:notificationTimeout="100"
     android:settingsActivity="com.nexa.agent.MainActivity" />

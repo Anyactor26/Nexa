@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'dart:math' as math;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../main.dart';
+import '../main.dart' show themeNotifier, globalActionHandler, globalAiService, globalTelegramService, globalDiscordService, globalWakeWordService;
 import '../services/ai_service.dart';
 import '../services/shizuku_service.dart';
 import '../services/screen_automation_service.dart';
@@ -42,6 +42,7 @@ class _SettingsScreenState extends State<SettingsScreen>
   late TextEditingController _baseUrlController;
   late TextEditingController _modelController;
   late TextEditingController _telegramTokenController;
+  late TextEditingController _telegramPasswordController;
   late TextEditingController _discordTokenController;
   late TextEditingController _discordChannelIdController;
   late TextEditingController _discordPasswordController;
@@ -72,6 +73,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     _telegramTokenController = TextEditingController(
       text: widget.telegramService.botToken,
     );
+    _telegramPasswordController = TextEditingController();
     _telegramEnabled = widget.telegramService.isEnabled;
     _discordTokenController = TextEditingController(
       text: widget.discordService.botToken,
@@ -99,6 +101,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     _baseUrlController.addListener(_autoSave);
     _modelController.addListener(_autoSave);
     _telegramTokenController.addListener(_autoSave);
+    _telegramPasswordController.addListener(_autoSave);
     _discordTokenController.addListener(_autoSave);
     _discordChannelIdController.addListener(_autoSave);
     _discordPasswordController.addListener(_autoSave);
@@ -128,6 +131,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     _baseUrlController.removeListener(_autoSave);
     _modelController.removeListener(_autoSave);
     _telegramTokenController.removeListener(_autoSave);
+    _telegramPasswordController.removeListener(_autoSave);
     _discordTokenController.removeListener(_autoSave);
     _discordChannelIdController.removeListener(_autoSave);
     _discordPasswordController.removeListener(_autoSave);
@@ -136,6 +140,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     _baseUrlController.dispose();
     _modelController.dispose();
     _telegramTokenController.dispose();
+    _telegramPasswordController.dispose();
     _discordTokenController.dispose();
     _discordChannelIdController.dispose();
     _discordPasswordController.dispose();
@@ -202,6 +207,7 @@ class _SettingsScreenState extends State<SettingsScreen>
     widget.telegramService.saveSettings(
       botToken: _telegramTokenController.text.trim(),
       isEnabled: _telegramEnabled,
+      authPassword: _telegramPasswordController.text.trim(),
     );
 
     widget.discordService.saveSettings(
@@ -983,7 +989,7 @@ class _SettingsScreenState extends State<SettingsScreen>
           _buildSettingsCard(
             icon: Icons.send_and_archive_outlined,
             title: 'Telegram Remote Access',
-            subtitle: 'Control your agent remotely from anywhere',
+            subtitle: 'See & control your phone remotely from anywhere',
             isDark: isDark,
             children: [
               TextField(
@@ -992,6 +998,23 @@ class _SettingsScreenState extends State<SettingsScreen>
                   labelText: 'Telegram Bot Token',
                   hintText: '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11',
                   prefixIcon: const Icon(Icons.send_rounded, size: 18),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _telegramPasswordController,
+                obscureText: _obscureKey,
+                decoration: _buildInputDecoration(
+                  labelText: 'Auth Password (for /auth)',
+                  hintText: 'Required before remote commands work',
+                  prefixIcon: const Icon(Icons.lock_outline_rounded, size: 18),
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                      _obscureKey ? Icons.visibility_off_rounded : Icons.visibility_rounded,
+                      size: 18,
+                    ),
+                    onPressed: () => setState(() => _obscureKey = !_obscureKey),
+                  ),
                 ),
               ),
               SwitchListTile(
