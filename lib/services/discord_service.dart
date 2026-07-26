@@ -55,9 +55,10 @@ class DiscordService {
   /// Discord user IDs that have successfully authenticated this session.
   final Set<String> _authenticatedUsers = {};
 
-  DiscordService(this._actionHandler, this._aiService) {
-    _screenService = _actionHandler.screenAutomation;
-    _shizukuService = _actionHandler.shizuku;
+  DiscordService(ActionHandler actionHandler, this._aiService)
+      : _actionHandler = actionHandler,
+        _screenService = actionHandler.screenAutomation,
+        _shizukuService = actionHandler.shizuku {
     _remoteControl = RemotePhoneControlService(
       screenService: _screenService,
       shizukuService: _shizukuService,

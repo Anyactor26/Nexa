@@ -103,7 +103,7 @@ class RemotePhoneControlService {
         // services before reaching handleCommand. This case exists for direct
         // invocation (e.g. via /run AI commands or other call paths).
 
-        case '/stream', '/screenshare', '/live':
+        case '/stream' || '/screenshare' || '/live':
           final intervalSeconds = int.tryParse(args.split(RegExp(r'\s+')).first) ?? 3;
           if (intervalSeconds < 1 || intervalSeconds > 30) {
             return RemoteControlResult.error('Interval must be 1–30 seconds. Usage: /stream [seconds]');
@@ -119,7 +119,7 @@ class RemotePhoneControlService {
           );
           return RemoteControlResult.success(description);
 
-        case '/stopstream', '/stopscreenshare', '/stoplive':
+        case '/stopstream' || '/stopscreenshare' || '/stoplive':
           if (!_screenshare.isStreaming(platform)) {
             return RemoteControlResult.success('No screenshare is currently running.');
           }

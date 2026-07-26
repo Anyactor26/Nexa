@@ -26,9 +26,10 @@ class TelegramService {
   // Authenticated Telegram chat IDs
   final Set<String> _authenticatedChats = {};
 
-  TelegramService(this._actionHandler, this._aiService) {
-    _screenService = _actionHandler.screenAutomation;
-    _shizukuService = _actionHandler.shizuku;
+  TelegramService(ActionHandler actionHandler, this._aiService)
+      : _actionHandler = actionHandler,
+        _screenService = actionHandler.screenAutomation,
+        _shizukuService = actionHandler.shizuku {
     _remoteControl = RemotePhoneControlService(
       screenService: _screenService,
       shizukuService: _shizukuService,
