@@ -1,4 +1,4 @@
-package com.orailnoor.privateagent
+package com.nexa.agent
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
@@ -19,7 +19,7 @@ import java.io.ByteArrayOutputStream
 
 class AgentAccessibilityService : AccessibilityService() {
 
-    private val ownPackageName = "com.orailnoor.privateagent"
+    private val ownPackageName = "com.nexa.agent"
 
     companion object {
         var instance: AgentAccessibilityService? = null
@@ -40,7 +40,7 @@ class AgentAccessibilityService : AccessibilityService() {
         val listener = eventListener ?: return
         
         // Filter out events from our own app so we don't record the Stop Overlay button clicks
-        if (event.packageName?.toString() == "com.orailnoor.privateagent") return
+        if (event.packageName?.toString() == "com.nexa.agent") return
         
         when (event.eventType) {
             AccessibilityEvent.TYPE_VIEW_CLICKED -> {
@@ -496,7 +496,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 continue
             }
 
-            // An active PrivateAgent application window is the main Flutter app.
+            // An active Nexa application window is the main Flutter app.
             // Return it so TaskExecutor can press Home before taking its first dump.
             // The floating overlay is a system overlay, not an application window.
             if (window.isActive || window.isFocused) {

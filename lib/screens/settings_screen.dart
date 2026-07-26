@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:math' as math;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../main.dart';
@@ -6,6 +7,8 @@ import '../services/ai_service.dart';
 import '../services/shizuku_service.dart';
 import '../services/screen_automation_service.dart';
 import '../services/telegram_service.dart';
+import '../services/discord_service.dart';
+import '../services/wake_word_service.dart';
 import 'task_history_screen.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
@@ -16,6 +19,8 @@ class SettingsScreen extends StatefulWidget {
   final ShizukuService shizukuService;
   final ScreenAutomationService screenAutomationService;
   final TelegramService telegramService;
+  final DiscordService discordService;
+  final WakeWordService wakeWordService;
 
   const SettingsScreen({
     super.key,
@@ -23,6 +28,8 @@ class SettingsScreen extends StatefulWidget {
     required this.shizukuService,
     required this.screenAutomationService,
     required this.telegramService,
+    required this.discordService,
+    required this.wakeWordService,
   });
 
   @override
@@ -35,12 +42,18 @@ class _SettingsScreenState extends State<SettingsScreen>
   late TextEditingController _baseUrlController;
   late TextEditingController _modelController;
   late TextEditingController _telegramTokenController;
+  late TextEditingController _discordTokenController;
+  late TextEditingController _discordChannelIdController;
+  late TextEditingController _discordPasswordController;
   bool _obscureKey = true;
   bool _telegramEnabled = false;
+  bool _discordEnabled = false;
+  bool _wakeWordEnabled = false;
   double _maxSteps = 15;
   bool _disableMaxSteps = false;
   late TextEditingController _maxTokensController;
   double _temperature = 1.0;
+  double _speedMultiplier = 1.0;
   bool _useScreenCompression = true;
   bool _useSystemPrompt = true;
   bool _floatingIconEnabled = false;
@@ -59,9 +72,21 @@ class _SettingsScreenState extends State<SettingsScreen>
       text: widget.telegramService.botToken,
     );
     _telegramEnabled = widget.telegramService.isEnabled;
+    _discordTokenController = TextEditingController(
+      text: widget.discordService.botToken,
+    );
+    _discordChannelIdController = TextEditingController(
+      text: widget.discordService.channelId,
+    );
+    _discordPasswordController = TextEditingController(
+      text: widget.discordService.authPassword,
+    );
+    _discordEnabled = widget.discordService.isEnabled;
+    _wakeWordEnabled = widget.wakeWordService.isEnabled;
     _maxSteps = widget.aiService.rawMaxSteps.toDouble();
     _disableMaxSteps = widget.aiService.disableMaxSteps;
     _temperature = widget.aiService.temperature;
+    _speedMultiplier = widget.aiService.speedMultiplier;
     _maxTokensController = TextEditingController(
       text: widget.aiService.maxTokens.toString(),
     );
@@ -73,6 +98,9 @@ class _SettingsScreenState extends State<SettingsScreen>
     _baseUrlController.addListener(_autoSave);
     _modelController.addListener(_autoSave);
     _telegramTokenController.addListener(_autoSave);
+    _discordTokenController.addListener(_autoSave);
+    _discordChannelIdController.addListener(_autoSave);
+    _discordPasswordController.addListener(_autoSave);
     _maxTokensController.addListener(_autoSave);
 
     _checkPermissions();
@@ -99,11 +127,17 @@ class _SettingsScreenState extends State<SettingsScreen>
     _baseUrlController.removeListener(_autoSave);
     _modelController.removeListener(_autoSave);
     _telegramTokenController.removeListener(_autoSave);
+    _discordTokenController.removeListener(_autoSave);
+    _discordChannelIdController.removeListener(_autoSave);
+    _discordPasswordController.removeListener(_autoSave);
     _maxTokensController.removeListener(_autoSave);
     _apiKeyController.dispose();
     _baseUrlController.dispose();
     _modelController.dispose();
     _telegramTokenController.dispose();
+    _discordTokenController.dispose();
+    _discordChannelIdController.dispose();
+    _discordPasswordController.dispose();
     _maxTokensController.dispose();
     super.dispose();
   }
@@ -145,6 +179,18 @@ class _SettingsScreenState extends State<SettingsScreen>
     setState(() => _permissions[name] = status);
   }
 
+  /// Maps a 1x-200x multiplier onto a 0.0-1.0 log-scale slider position.
+  static double _speedLog(double speed) {
+    final clamped = speed.clamp(1.0, 200.0);
+    return (math.log(clamped) / math.log(200.0)).clamp(0.0, 1.0);
+  }
+
+  /// Inverse of [_speedLog]: maps a 0.0-1.0 slider position back to 1x-200x.
+  static double _speedFromLog(double position) {
+    final speed = math.pow(200.0, position.clamp(0.0, 1.0)).toDouble();
+    return speed.clamp(1.0, 200.0);
+  }
+
   void _autoSave() {
     widget.aiService.saveSettings(
       apiKey: _apiKeyController.text.trim(),
@@ -157,6 +203,13 @@ class _SettingsScreenState extends State<SettingsScreen>
       isEnabled: _telegramEnabled,
     );
 
+    widget.discordService.saveSettings(
+      botToken: _discordTokenController.text.trim(),
+      channelId: _discordChannelIdController.text.trim(),
+      authPassword: _discordPasswordController.text,
+      isEnabled: _discordEnabled,
+    );
+
     widget.aiService.saveMaxSteps(_maxSteps.toInt());
     widget.aiService.saveDisableMaxSteps(_disableMaxSteps);
     widget.aiService.saveAdvancedSettings(
@@ -165,6 +218,7 @@ class _SettingsScreenState extends State<SettingsScreen>
       useScreenCompression: _useScreenCompression,
       useSystemPrompt: _useSystemPrompt,
     );
+    widget.aiService.saveSpeedMultiplier(_speedMultiplier);
   }
 
   Future<void> _fetchModels() async {
@@ -662,6 +716,56 @@ class _SettingsScreenState extends State<SettingsScreen>
                   _autoSave();
                 },
               ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Icon(
+                    Icons.speed_rounded,
+                    size: 16,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Automation Speed: ${_speedMultiplier.toStringAsFixed(_speedMultiplier < 10 ? 1 : 0)}x',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w500,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                _speedMultiplier <= 1.0
+                    ? 'Normal, safe pace between automation steps.'
+                    : 'Shrinks every wait between taps/scrolls/screens by ${_speedMultiplier.toStringAsFixed(_speedMultiplier < 10 ? 1 : 0)}x. '
+                          'Very high speeds may occasionally act before a screen '
+                          'finishes loading.',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: isDark
+                      ? const Color(0xFF94A3B8)
+                      : const Color(0xFF64748B),
+                ),
+              ),
+              Slider(
+                // The perceptible difference between 1x-20x matters far more
+                // than 100x-200x, so the slider works in log-space for a much
+                // more usable feel across the full 1x-200x range.
+                value: _speedLog(_speedMultiplier),
+                min: 0.0,
+                max: 1.0,
+                divisions: 100,
+                label: '${_speedMultiplier.toStringAsFixed(_speedMultiplier < 10 ? 1 : 0)}x',
+                onChanged: (value) {
+                  setState(() {
+                    _speedMultiplier = _speedFromLog(value);
+                  });
+                },
+                onChangeEnd: (value) {
+                  _autoSave();
+                },
+              ),
             ],
           ),
 
@@ -726,7 +830,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                       if (await FlutterOverlayWindow.isActive() == false) {
                         await FlutterOverlayWindow.showOverlay(
                           enableDrag: true,
-                          overlayTitle: "PrivateAgent",
+                          overlayTitle: "Nexa",
                           overlayContent: "Floating Assistant",
                           flag: OverlayFlag.focusPointer,
                           alignment: OverlayAlignment.centerRight,
@@ -747,6 +851,44 @@ class _SettingsScreenState extends State<SettingsScreen>
                   },
                   contentPadding: EdgeInsets.zero,
                 ),
+              SwitchListTile(
+                title: Row(
+                  children: [
+                    const Text('"Hey Nexa" Wake Word'),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.primary.withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        'BETA',
+                        style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w800,
+                          color: Theme.of(context).colorScheme.primary,
+                          letterSpacing: 0.4,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                subtitle: const Text(
+                  'Continuously listens for "Hey Nexa" to start a command hands-free',
+                ),
+                value: _wakeWordEnabled,
+                onChanged: (bool value) async {
+                  await widget.wakeWordService.setEnabled(value);
+                  setState(() => _wakeWordEnabled = value);
+                },
+                contentPadding: EdgeInsets.zero,
+              ),
             ],
           ),
 
@@ -771,6 +913,118 @@ class _SettingsScreenState extends State<SettingsScreen>
                 value: _telegramEnabled,
                 onChanged: (val) {
                   setState(() => _telegramEnabled = val);
+                  _autoSave();
+                },
+                contentPadding: EdgeInsets.zero,
+              ),
+            ],
+          ),
+
+          // 5b. Discord Remote Control Card
+          _buildSettingsCard(
+            icon: Icons.forum_rounded,
+            title: 'Discord Remote Control',
+            subtitle: 'A polished, real-time command console inside Discord',
+            isDark: isDark,
+            children: [
+              TextField(
+                controller: _discordTokenController,
+                obscureText: _obscureKey,
+                decoration: _buildInputDecoration(
+                  labelText: 'Discord Bot Token',
+                  hintText: 'Paste your bot token from the Discord Developer Portal',
+                  prefixIcon: const Icon(Icons.smart_toy_rounded, size: 18),
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                      _obscureKey
+                          ? Icons.visibility_off_rounded
+                          : Icons.visibility_rounded,
+                      size: 18,
+                    ),
+                    onPressed: () =>
+                        setState(() => _obscureKey = !_obscureKey),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _discordChannelIdController,
+                keyboardType: TextInputType.number,
+                decoration: _buildInputDecoration(
+                  labelText: 'Discord Channel ID',
+                  hintText: 'e.g. 1123456789012345678',
+                  prefixIcon: const Icon(Icons.tag_rounded, size: 18),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _discordPasswordController,
+                obscureText: _obscureKey,
+                decoration: _buildInputDecoration(
+                  labelText: 'Auth Password (for !nexa_password)',
+                  hintText: 'Shared secret Discord users must provide',
+                  prefixIcon: const Icon(Icons.lock_outline_rounded, size: 18),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF5865F2).withOpacity(isDark ? 0.14 : 0.08),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: const Color(0xFF5865F2).withOpacity(0.25),
+                    width: 1,
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.bolt_rounded,
+                          size: 16,
+                          color: Color(0xFF5865F2),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          'How it works',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: isDark
+                                ? const Color(0xFFC7D2FE)
+                                : const Color(0xFF4338CA),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      '1. Authenticate once: !nexa_password <token>\n'
+                      '2. Run anything:      !nexa <command>\n'
+                      '3. Nexa replies with a live-updating status embed — no channel spam.',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        height: 1.5,
+                        color: isDark
+                            ? const Color(0xFF94A3B8)
+                            : const Color(0xFF475569),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 4),
+              SwitchListTile(
+                title: const Text('Enable Discord Bot'),
+                subtitle: const Text(
+                  'Polls the channel every 3 seconds for new commands',
+                ),
+                value: _discordEnabled,
+                onChanged: (val) {
+                  setState(() => _discordEnabled = val);
                   _autoSave();
                 },
                 contentPadding: EdgeInsets.zero,
@@ -825,7 +1079,7 @@ class _SettingsScreenState extends State<SettingsScreen>
           // 9. About / Links Card
           _buildSettingsCard(
             icon: Icons.info_outline_rounded,
-            title: 'About PrivateAgent',
+            title: 'About Nexa',
             subtitle: 'Resources and repository access',
             isDark: isDark,
             children: [
@@ -836,7 +1090,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                 leading: const Icon(Icons.code_rounded),
                 onTap: () {
                   launchUrl(
-                    Uri.parse('https://github.com/orailnoor/private-agent'),
+                    Uri.parse('https://github.com/Anyactor26/Nexa'),
                     mode: LaunchMode.externalApplication,
                   );
                 },
@@ -1070,7 +1324,7 @@ class _SettingsScreenState extends State<SettingsScreen>
                 const SizedBox(height: 12),
                 if (!isRunning) ...[
                   const Text(
-                    'Tap below to open Accessibility Settings, then find "PrivateAgent Screen Control" and enable it.',
+                    'Tap below to open Accessibility Settings, then find "Nexa Screen Control" and enable it.',
                     style: TextStyle(fontSize: 13),
                   ),
                   const SizedBox(height: 12),

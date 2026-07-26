@@ -5,7 +5,7 @@ import 'dart:developer' as developer;
 /// Dart bridge to the native AccessibilityService.
 /// Provides screen reading, UI element interaction, and gesture control.
 class ScreenAutomationService {
-  static const _channel = MethodChannel('com.privateagent/accessibility');
+  static const _channel = MethodChannel('com.nexa.agent/accessibility');
   static const _channelTimeout = Duration(seconds: 3);
 
   static Future<T?> _invoke<T>(String method, [Map<String, Object?>? arguments]) {
@@ -25,7 +25,7 @@ class ScreenAutomationService {
       return await _invoke<bool>('ping') ?? false;
     } catch (e) {
       developer.log('Accessibility channel readiness check failed: $e',
-          name: 'PrivateAgent');
+          name: 'Nexa');
       return false;
     }
   }

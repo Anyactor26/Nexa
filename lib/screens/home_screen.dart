@@ -4,11 +4,15 @@ import 'dart:developer' as developer;
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../models/chat_message.dart';
+import '../models/agent_action.dart';
 import '../services/ai_service.dart';
 import '../services/action_handler.dart';
 import '../services/voice_service.dart';
 import '../widgets/message_bubble.dart';
 import '../services/telegram_service.dart';
+import '../services/discord_service.dart';
+import '../services/wake_word_service.dart';
+import '../services/local_command_router.dart';
 import '../services/chat_history_service.dart';
 import '../services/notification_service.dart';
 import 'settings_screen.dart';
@@ -32,6 +36,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final VoiceService _voiceService = VoiceService();
   final NotificationService _notificationService = NotificationService();
   late final TelegramService _telegramService;
+  late final DiscordService _discordService;
+  final WakeWordService _wakeWordService = WakeWordService();
+  final LocalCommandRouter _localCommandRouter = LocalCommandRouter();
 
   final List<ChatMessage> _messages = [];
   bool _isLoading = false;
@@ -52,6 +59,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _telegramService = TelegramService(_actionHandler, _aiService);
+    _discordService = DiscordService(_actionHandler, _aiService);
     _initServices();
     _startOverlayHistorySync();
     // Register as the handler for overlay bubble tasks
@@ -63,6 +71,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     await _notificationService.requestPermission();
     await _voiceService.init();
     await _telegramService.init();
+    await _discordService.init();
+    await _wakeWordService.init(onWakeWord: _onWakeWordDetected);
     await _actionHandler.shizuku.checkAvailability();
 
     if (mounted) {
@@ -97,7 +107,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _sendMessage(String text) async {
     if (text.trim().isEmpty) return;
 
-    final userMessage = ChatMessage(role: 'user', content: text.trim());
+    final trimmedText = text.trim();
+    final userMessage = ChatMessage(role: 'user', content: trimmedText);
     setState(() {
       _messages.add(userMessage);
       _isLoading = true;
@@ -106,6 +117,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _textController.clear();
     _scrollToBottom();
     await _saveSession();
+
+    // Try to resolve obvious commands (call, text, volume, alarm, open app,
+    // run command) with regex matching BEFORE hitting the AI API — this
+    // saves tokens and is instant for the common case.
+    if (_mode == 'agent') {
+      final localAction = _localCommandRouter.route(trimmedText);
+      if (localAction != null) {
+        await _executeLocalAction(localAction, trimmedText);
+        return;
+      }
+    }
 
     // Add empty placeholder assistant message for streaming
     final assistantMessage = ChatMessage(role: 'assistant', content: '');
@@ -117,7 +139,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     try {
       final isAgent = _mode == 'agent';
       final stream = _aiService
-          .sendMessageStream(text.trim(), isAgentMode: isAgent)
+          .sendMessageStream(trimmedText, isAgentMode: isAgent)
           .timeout(
             const Duration(seconds: 90),
             onTimeout: (sink) {
@@ -154,14 +176,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           _messages.removeAt(assistantIndex);
         });
 
-        await _showTaskProgressOverlay('Starting: ${text.trim()}');
+        await _showTaskProgressOverlay('Starting: $trimmedText');
 
         // Execute the action (pass aiService for multi-step tasks)
         final result = await _actionHandler.execute(
           action,
           aiService: _aiService,
           onProgress: (msg) {
-            developer.log('Task progress: $msg', name: 'PrivateAgent');
+            developer.log('Task progress: $msg', name: 'Nexa');
             _sendOverlayEvent('OVERLAY_PROGRESS', msg);
             if (mounted) {
               setState(() {
@@ -234,18 +256,101 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// Executes an [AgentAction] resolved by [LocalCommandRouter] without ever
+  /// touching the AI API. Mirrors the same UI/notification flow as the
+  /// normal AI-driven action path in [_sendMessage] so the experience is
+  /// seamless regardless of which route handled the request.
+  Future<void> _executeLocalAction(AgentAction action, String originalText) async {
+    setState(() {
+      _messages.add(
+        ChatMessage(role: 'assistant', content: action.response),
+      );
+    });
+    _scrollToBottom();
+
+    await _showTaskProgressOverlay('Starting: $originalText');
+
+    try {
+      final result = await _actionHandler.execute(
+        action,
+        aiService: _aiService,
+        onProgress: (msg) {
+          developer.log('Local task progress: $msg', name: 'Nexa');
+          _sendOverlayEvent('OVERLAY_PROGRESS', msg);
+          if (mounted) {
+            setState(() {
+              _messages.add(ChatMessage(role: 'assistant', content: '⏳ $msg'));
+            });
+            _scrollToBottom();
+          }
+        },
+      );
+
+      if (mounted) {
+        setState(() {
+          _messages.add(
+            ChatMessage(
+              role: 'assistant',
+              content: result.success
+                  ? (result.details ?? action.response)
+                  : '⚠️ ${result.details ?? 'Something went wrong.'}',
+              actionResult: result,
+            ),
+          );
+        });
+      }
+
+      _sendOverlayEvent(
+        'OVERLAY_TASK_FINISHED',
+        result.success
+            ? (result.details ?? 'Task complete.')
+            : 'Task failed: ${result.details ?? 'Unknown error'}',
+      );
+
+      if (action.action != 'execute_task') {
+        await _notificationService.showTaskCompleteNotification(
+          result.success ? 'Task Completed' : 'Task Failed',
+          result.details ??
+              (result.success
+                  ? 'Agent finished its goal.'
+                  : 'Agent could not complete the task.'),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _messages.add(
+            ChatMessage(
+              role: 'assistant',
+              content: 'Error: ${e.toString().replaceFirst('Exception: ', '')}',
+            ),
+          );
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+        _scrollToBottom();
+        _updateOverlayState();
+      }
+      await _saveSession();
+    }
+  }
+
   Future<void> _showTaskProgressOverlay(String message) async {
     if (!FeatureFlags.floatingOverlayEnabled) return;
     if (!await FlutterOverlayWindow.isPermissionGranted()) return;
 
-    // Never cover PrivateAgent itself. The lifecycle observer will create the
+    // Never cover Nexa itself. The lifecycle observer will create the
     // overlay after an automated action moves this app to the background.
     if (_appLifecycleState != AppLifecycleState.paused) return;
 
     if (!await FlutterOverlayWindow.isActive()) {
       await FlutterOverlayWindow.showOverlay(
         enableDrag: true,
-        overlayTitle: 'PrivateAgent',
+        overlayTitle: 'Nexa',
         overlayContent: 'Performing task...',
         flag: OverlayFlag.focusPointer,
         alignment: OverlayAlignment.centerRight,
@@ -303,9 +408,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (_isListening) {
       await _voiceService.stopListening();
       setState(() => _isListening = false);
+      _wakeWordService.resume();
       return;
     }
 
+    // Avoid mic contention between the wake-word listener and the main mic.
+    _wakeWordService.pause();
     setState(() => _isListening = true);
 
     await _voiceService.startListening(
@@ -316,6 +424,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         if (mounted) {
           setState(() => _isListening = false);
         }
+        _wakeWordService.resume();
       },
     );
   }
@@ -355,7 +464,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _scrollController.dispose();
     _voiceService.dispose();
     _telegramService.dispose();
+    _discordService.dispose();
+    _wakeWordService.dispose();
     super.dispose();
+  }
+
+  /// Called by [WakeWordService] whenever "Hey Nexa" is heard. If the user
+  /// kept talking after the wake phrase, treat that as the command directly;
+  /// otherwise, start listening for the actual command via voice input.
+  void _onWakeWordDetected(String trailingText) {
+    if (!mounted) return;
+    if (trailingText.trim().isNotEmpty) {
+      _sendMessage(trailingText.trim());
+      return;
+    }
+    _toggleVoice();
   }
 
   @override
@@ -435,7 +558,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (await FlutterOverlayWindow.isActive()) return;
       await FlutterOverlayWindow.showOverlay(
         enableDrag: true,
-        overlayTitle: "PrivateAgent",
+        overlayTitle: "Nexa",
         overlayContent: _isLoading
             ? "Performing task..."
             : "Floating Assistant",
@@ -535,6 +658,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     shizukuService: _actionHandler.shizuku,
                     screenAutomationService: _actionHandler.screenAutomation,
                     telegramService: _telegramService,
+                    discordService: _discordService,
+                    wakeWordService: _wakeWordService,
                   ),
                 ),
               );
@@ -607,6 +732,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 screenAutomationService:
                                     _actionHandler.screenAutomation,
                                 telegramService: _telegramService,
+                                discordService: _discordService,
+                                wakeWordService: _wakeWordService,
                               ),
                             ),
                           );
@@ -742,7 +869,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   size: 26,
                 ),
                 const SizedBox(width: 12),
-                Text('PrivateAgent', style: headerStyle),
+                Text('Nexa', style: headerStyle),
               ],
             ),
           ),
@@ -956,6 +1083,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     shizukuService: _actionHandler.shizuku,
                     screenAutomationService: _actionHandler.screenAutomation,
                     telegramService: _telegramService,
+                    discordService: _discordService,
+                    wakeWordService: _wakeWordService,
                   ),
                 ),
               );

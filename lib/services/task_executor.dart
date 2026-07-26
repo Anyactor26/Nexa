@@ -126,7 +126,7 @@ Rules:
       await ScreenAutomationService.logToNative(
         "[TaskExecutor] Accessibility service not running, returning early.",
       );
-      return 'Accessibility service is not enabled. Go to Settings \u2192 Accessibility \u2192 PrivateAgent Screen Control and enable it.';
+      return 'Accessibility service is not enabled. Go to Settings \u2192 Accessibility \u2192 Nexa Screen Control and enable it.';
     }
 
     final results = <String>[];
@@ -182,11 +182,11 @@ Rules:
           final appName = step.params['app_name'] as String? ?? '';
           final res = await _appLauncher.openApp(appName);
           success = res.startsWith('Opened');
-          await Future.delayed(const Duration(milliseconds: 3000));
+          await Future.delayed(_aiService.scaledDelay(const Duration(milliseconds: 3000)));
         } else if (step.action == 'click_text') {
           final text = step.params['text'] as String? ?? '';
           success = await _screenService.clickByText(text);
-          await Future.delayed(const Duration(milliseconds: 1500));
+          await Future.delayed(_aiService.scaledDelay(const Duration(milliseconds: 1500)));
         }
 
         if (success) {
@@ -197,13 +197,13 @@ Rules:
         }
       }
     } else {
-      // If no shortcut is used, and we are currently inside the PrivateAgent app,
+      // If no shortcut is used, and we are currently inside the Nexa app,
       // press Home so the AI doesn't see its own chat bubbles and get confused by the task text.
       final currentPkg = await _screenService.getCurrentPackage();
-      if (currentPkg == 'com.orailnoor.privateagent') {
+      if (currentPkg == 'com.nexa.agent') {
         _report('Moving to background...');
         await _screenService.pressHome();
-        await Future.delayed(const Duration(milliseconds: 1500));
+        await Future.delayed(_aiService.scaledDelay(const Duration(milliseconds: 1500)));
       }
     }
 
@@ -239,7 +239,7 @@ Rules:
       } else if (lastAction == 'scroll') {
         delay = 1000; // Scrolling is relatively fast
       }
-      await Future.delayed(Duration(milliseconds: delay));
+      await Future.delayed(_aiService.scaledDelay(Duration(milliseconds: delay)));
 
       // 1. Read the current screen text
       final screenContent = _aiService.useScreenCompression
@@ -247,7 +247,7 @@ Rules:
           : await _screenService.getScreenDescription();
       developer.log(
         '=== SCREEN DUMP (Step ${step + 1}) ===\n$screenContent',
-        name: 'PrivateAgent',
+        name: 'Nexa',
       );
 
       // Determine previous result string
@@ -270,7 +270,7 @@ CURRENT SCREEN TEXT DUMP:
 $screenContent$prevResultStr$failureHint
 Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. What is the next action?''';
 
-      developer.log('=== AI PROMPT ===\n$prompt', name: 'PrivateAgent');
+      developer.log('=== AI PROMPT ===\n$prompt', name: 'Nexa');
 
       // 3. Get AI response — races against cancel signal so Stop works immediately
       String response;
@@ -308,7 +308,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
 
         developer.log(
           '=== RAW AI RESPONSE ===\n$response',
-          name: 'PrivateAgent',
+          name: 'Nexa',
         );
       } catch (e) {
         if (_cancelled) {
@@ -326,7 +326,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
             results,
           );
           await _screenService.showToast('Task Cancelled');
-          await Future.delayed(const Duration(seconds: 2));
+          await Future.delayed(_aiService.scaledDelay(const Duration(seconds: 2)));
           return 'Task cancelled.';
         }
         results.add('AI error: $e');
@@ -343,7 +343,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
           results,
         );
         await _screenService.showToast('AI Error: $e');
-        await Future.delayed(const Duration(seconds: 3));
+        await Future.delayed(_aiService.scaledDelay(const Duration(seconds: 3)));
         return 'I could not complete the task because the AI service failed.';
       }
 
@@ -363,7 +363,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
           results,
         );
         await _screenService.showToast('Task Cancelled');
-        await Future.delayed(const Duration(seconds: 2));
+        await Future.delayed(_aiService.scaledDelay(const Duration(seconds: 2)));
         return 'Task cancelled.';
       }
 
@@ -379,11 +379,11 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
         // First attempt failed — retry once
         developer.log(
           '=== JSON PARSE FAILED, RETRYING ===\nError: $firstError\nRaw: $response',
-          name: 'PrivateAgent',
+          name: 'Nexa',
         );
         _report('Retrying step ${step + 1}...\n(Failed to parse: $firstError)');
         // Wait 2 seconds before retrying to prevent rate-limit spam
-        await Future.delayed(const Duration(seconds: 2));
+        await Future.delayed(_aiService.scaledDelay(const Duration(seconds: 2)));
         try {
           final retryResponse = await _aiService.sendTaskMessage(
             _taskSystemPrompt,
@@ -392,7 +392,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
           totalTokens += retryResponse.totalTokens;
           developer.log(
             '=== RETRY AI RESPONSE ===\n${retryResponse.content}',
-            name: 'PrivateAgent',
+            name: 'Nexa',
           );
 
           String jsonStr = _extractJson(retryResponse.content);
@@ -416,7 +416,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
             results,
           );
           await _screenService.showToast('Agent Error: $e');
-          await Future.delayed(const Duration(seconds: 3));
+          await Future.delayed(_aiService.scaledDelay(const Duration(seconds: 3)));
           return 'I could not understand the AI response. Please try again.';
         }
       }
@@ -428,7 +428,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
 
       developer.log(
         '=== PARSED ACTION ===\nAction: $action\nParams: $params\nReasoning: $reasoning\nIs Complete: $isComplete',
-        name: 'PrivateAgent',
+        name: 'Nexa',
       );
 
       _report('Step ${step + 1}: $reasoning');
@@ -518,7 +518,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
           break;
 
         case 'wait':
-          await Future.delayed(const Duration(seconds: 1));
+          await Future.delayed(_aiService.scaledDelay(const Duration(seconds: 1)));
           actionResult = 'Waited';
           success = true;
           break;
@@ -539,7 +539,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
 
       developer.log(
         '=== NATIVE EXECUTION RESULT ===\n$actionResult',
-        name: 'PrivateAgent',
+        name: 'Nexa',
       );
 
       // Track consecutive failures to detect stuck loops
@@ -569,7 +569,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
             results,
           );
           await _screenService.showToast('Agent stuck. Task stopped.');
-          await Future.delayed(const Duration(seconds: 4));
+          await Future.delayed(_aiService.scaledDelay(const Duration(seconds: 4)));
           return 'I could not complete the task. Please try again.';
         }
 
@@ -577,7 +577,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
         _report('Recovering: ${recovery.description}');
 
         if (recovery.action == 'wait') {
-          await Future.delayed(const Duration(seconds: 2));
+          await Future.delayed(_aiService.scaledDelay(const Duration(seconds: 2)));
         } else if (recovery.action == 'press_back') {
           await _screenService.pressBack();
         } else if (recovery.action == 'scroll') {
@@ -630,7 +630,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
 
         await _screenService.showToast('Task Complete!');
         // Wait 4 seconds so the user can see the result before jumping back
-        await Future.delayed(const Duration(seconds: 4));
+        await Future.delayed(_aiService.scaledDelay(const Duration(seconds: 4)));
         return reasoning.trim().isEmpty ? 'Done.' : reasoning.trim();
       }
     }
@@ -651,7 +651,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
       results,
     );
     await _screenService.showToast('Reached maximum steps.');
-    await Future.delayed(const Duration(seconds: 4));
+    await Future.delayed(_aiService.scaledDelay(const Duration(seconds: 4)));
 
     return 'I could not complete the task within the allowed steps.';
   }
@@ -720,7 +720,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
       else if (step.action == 'scroll')
         delay = 1000;
 
-      await Future.delayed(Duration(milliseconds: delay));
+      await Future.delayed(_aiService.scaledDelay(Duration(milliseconds: delay)));
 
       bool success = false;
       String actionResult = '';
@@ -780,7 +780,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
           success = actionResult.startsWith('Opened');
           break;
         case 'wait':
-          await Future.delayed(const Duration(seconds: 1));
+          await Future.delayed(_aiService.scaledDelay(const Duration(seconds: 1)));
           actionResult = 'Waited';
           success = true;
           break;
@@ -796,7 +796,7 @@ Step ${step + 1}/${_aiService.maxSteps}. Look at the text dump and coordinates. 
       results.add('Memory Replay Step ${i + 1}: $actionResult');
       developer.log(
         '=== MEMORY REPLAY RESULT ===\n$actionResult',
-        name: 'PrivateAgent',
+        name: 'Nexa',
       );
 
       if (!success) {

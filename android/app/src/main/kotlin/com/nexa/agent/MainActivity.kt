@@ -1,4 +1,4 @@
-package com.orailnoor.privateagent
+package com.nexa.agent
 
 import android.content.Intent
 import android.provider.Settings
@@ -15,8 +15,8 @@ import android.widget.Button
 import android.net.Uri
 
 class MainActivity : FlutterActivity() {
-    private val CHANNEL = "com.privateagent/accessibility"
-    private val EVENT_CHANNEL = "com.privateagent/accessibility_events"
+    private val CHANNEL = "com.nexa.agent/accessibility"
+    private val EVENT_CHANNEL = "com.nexa.agent/accessibility_events"
     private var eventSink: EventChannel.EventSink? = null
     private var overlayView: View? = null
 
@@ -46,15 +46,15 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         fun registerAccessibilityChannel(flutterEngine: FlutterEngine, context: android.content.Context) {
-            MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.privateagent/accessibility")
+            MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.nexa.agent/accessibility")
                 .setMethodCallHandler { call, result ->
-                    android.util.Log.d("PrivateAgentKotlin", "Received method call: ${call.method}")
+                    android.util.Log.d("NexaKotlin", "Received method call: ${call.method}")
                     when (call.method) {
                         "ping" -> result.success(true)
 
                         "logToNative" -> {
                             val msg = call.argument<String>("message") ?: ""
-                            android.util.Log.d("PrivateAgentDart", msg)
+                            android.util.Log.d("NexaDart", msg)
                             result.success(true)
                         }
 
@@ -238,12 +238,12 @@ class BackgroundEngineReceiver : android.content.BroadcastReceiver() {
             .getInstance()
             .get("myCachedEngine")
         if (engine == null) {
-            android.util.Log.e("PrivateAgent", "Background engine myCachedEngine was not found")
+            android.util.Log.e("Nexa", "Background engine myCachedEngine was not found")
             return
         }
 
         android.util.Log.d(
-            "PrivateAgent",
+            "Nexa",
             "Registering accessibility channel on myCachedEngine " +
                 "(engine=${System.identityHashCode(engine)}, " +
                 "dartExecuting=${engine.dartExecutor.isExecutingDart})"

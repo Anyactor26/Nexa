@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:private_agent/services/ai_service.dart';
+import 'package:nexa/services/ai_service.dart';
 
 void main() {
   test('recognizes only the NVIDIA hosted API URL', () {
